@@ -2,7 +2,11 @@
 #
 # BotDeck installer — no Docker required.
 #
+# From a cloned repository:
 #   sudo bash scripts/install.sh
+#
+# One-liner (downloads the source automatically):
+#   curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/<branch>/scripts/install.sh | sudo bash
 #
 # Optional environment variables:
 #   APP_DIR=/opt/botdeck      installation folder
@@ -10,6 +14,8 @@
 #   SERVICE_USER=botdeck      linux user that runs the panel + bots
 #   NODE_MAJOR=22             Node.js version installed when none is present
 #   NO_SYSTEMD=1              only copy files, don't install the service
+#   BOTDECK_REPO=owner/repo   GitHub repository used by the one-liner
+#   BOTDECK_REF=branch        git ref (branch/tag/sha) used by the one-liner
 #
 set -euo pipefail
 
@@ -19,7 +25,26 @@ SERVICE_NAME="botdeck"
 SERVICE_USER="${SERVICE_USER:-botdeck}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="${BOTDECK_REPO:-siddhantpashte123-hub/blueeee}"
+SOURCE_REF="${BOTDECK_REF:-}"
+FALLBACK_REFS=("main" "arena/ac969ea0-blueeee")
+
+# When the script is piped into bash there is no checkout next to it, so the
+# source is downloaded from GitHub instead.
+SELF="${BASH_SOURCE[0]:-}"
+SRC_DIR=""
+if [ -n "$SELF" ] && [ -f "$SELF" ]; then
+  CANDIDATE="$(cd "$(dirname "$SELF")/.." 2>/dev/null && pwd || true)"
+  if [ -n "$CANDIDATE" ] && [ -f "$CANDIDATE/server.js" ]; then
+    SRC_DIR="$CANDIDATE"
+  fi
+fi
+
+TMP_ROOT=""
+cleanup() {
+  if [ -n "$TMP_ROOT" ] && [ -d "$TMP_ROOT" ]; then rm -rf "$TMP_ROOT"; fi
+}
+trap cleanup EXIT
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  \033[36m→\033[0m %s\n' "$*"; }
@@ -33,6 +58,59 @@ bold ""
 bold "  BotDeck installer — Docker-free bot hosting panel"
 bold "  =================================================="
 echo
+
+# ----------------------------------------------------------------- source ---
+fetch_tarball() {
+  local ref="$1" dest="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 15 --max-time 180 \
+      "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${ref}" -o "$dest" 2>/dev/null && return 0
+    curl -fsSL --connect-timeout 15 --max-time 180 \
+      -H 'Accept: application/vnd.github+json' \
+      "https://api.github.com/repos/${REPO}/tarball/${ref}" -o "$dest" 2>/dev/null && return 0
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 30 -O "$dest" "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${ref}" 2>/dev/null && return 0
+    wget -q -T 30 -O "$dest" "https://api.github.com/repos/${REPO}/tarball/${ref}" 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+download_source() {
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    die "curl or wget is required to download the source"
+  fi
+
+  local refs=()
+  if [ -n "$SOURCE_REF" ]; then refs+=("$SOURCE_REF"); fi
+  refs+=("${FALLBACK_REFS[@]}")
+
+  TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/botdeck-src.XXXXXX")"
+  info "Downloading BotDeck from github.com/${REPO}"
+
+  local ref archive dir
+  for ref in "${refs[@]}"; do
+    archive="$TMP_ROOT/botdeck.tar.gz"
+    rm -rf "$TMP_ROOT/extract"
+    mkdir -p "$TMP_ROOT/extract"
+    if fetch_tarball "$ref" "$archive" && tar -xzf "$archive" -C "$TMP_ROOT/extract" 2>/dev/null; then
+      dir="$(find "$TMP_ROOT/extract" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+      if [ -n "$dir" ] && [ -f "$dir/server.js" ]; then
+        SRC_DIR="$dir"
+        ok "Source downloaded (${ref})"
+        return 0
+      fi
+    fi
+    warn "ref '${ref}' is not usable — trying the next one"
+  done
+
+  die "Could not download BotDeck. Check BOTDECK_REPO / BOTDECK_REF, or clone the repo and run: sudo bash scripts/install.sh"
+}
+
+if [ -z "$SRC_DIR" ]; then
+  download_source
+else
+  ok "Using local source: ${SRC_DIR}"
+fi
 
 # ------------------------------------------------------------------ node ---
 NODE_BIN="$(command -v node || true)"

@@ -64,10 +64,22 @@ Works fine on a 1 vCPU / 1 GB RAM box for a handful of light bots.
 
 ## Install
 
-### Automatic (recommended)
+### One command
 
 ```bash
-git clone <your-repo-url> botdeck
+curl -fsSL https://raw.githubusercontent.com/siddhantpashte123-hub/blueeee/arena/ac969ea0-blueeee/scripts/install.sh | sudo bash
+```
+
+This downloads the latest source, installs Node.js if needed, creates the
+`botdeck` service user, copies the panel to `/opt/botdeck`, installs the systemd
+service and starts it. Then open `http://YOUR_SERVER_IP:3000`.
+
+> Once this branch is merged into `main`, you can use the shorter `.../main/...` URL.
+
+### From a clone
+
+```bash
+git clone https://github.com/siddhantpashte123-hub/blueeee botdeck
 cd botdeck
 sudo bash scripts/install.sh
 ```
@@ -351,8 +363,11 @@ curl -sN "localhost:3000/api/bots/<id>/stream?token=$TOKEN"   # live console
 ## Updating
 
 ```bash
-cd botdeck && git pull
-sudo bash scripts/install.sh      # re-copies files & restarts the service
+# installed with the one-liner:
+curl -fsSL https://raw.githubusercontent.com/siddhantpashte123-hub/blueeee/arena/ac969ea0-blueeee/scripts/install.sh | sudo bash
+
+# installed from a clone:
+cd botdeck && git pull && sudo bash scripts/install.sh
 ```
 
 `data/` and `bots/` are never touched by the installer. Bots with
