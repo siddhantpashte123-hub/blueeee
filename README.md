@@ -123,7 +123,9 @@ botdeck logs          # tail -f /opt/botdeck/data/panel.log
 botdeck port 8090     # change port and restart automatically
 ```
 
-In this mode:
+In this mode the panel runs fully detached (own session, no controlling
+terminal), so closing SSH, pressing `Ctrl+C`, or logging out does **not** stop
+it — and your bots keep running.
 
 - panel log: `/opt/botdeck/data/panel.log`
 - autostart: cron `@reboot` entry in `/etc/cron.d/botdeck` (when cron exists)
@@ -280,6 +282,32 @@ server {
     }
 }
 ```
+
+### No public IP? Tunnel it (testing only)
+
+If the panel port is not reachable from the internet (private IP, firewall,
+CGNAT), you can expose it temporarily with a tunnel. Use the port printed by
+`botdeck status` (or your systemd unit):
+
+**Pinggy** (free, ssh based, URL changes every session, ~60 min):
+
+```bash
+ssh -p 443 -R0:localhost:8080 a.pinggy.io
+# add qr@ before the host to get a QR code:  qr@a.pinggy.io
+```
+
+It prints a public `https://….pinggy.link` URL — open that in the browser.
+
+**Cloudflare Tunnel** (permanent, needs a free Cloudflare account):
+
+```bash
+cloudflared tunnel --url http://localhost:8080
+```
+
+The panel itself needs no special configuration behind a tunnel. Remember the
+public URL can be opened by anyone: use a strong admin password and close the
+tunnel when you are done testing. For real deployments prefer a domain with
+HTTPS (Caddy/Nginx above) over a public tunnel.
 
 When using a reverse proxy, bind the panel to localhost only:
 

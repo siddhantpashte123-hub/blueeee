@@ -22,6 +22,8 @@ set -euo pipefail
 INSTALLER_VERSION="2.1"
 
 APP_DIR="${APP_DIR:-/opt/botdeck}"
+PORT_EXPLICIT=0
+if [ -n "${PORT:-}" ]; then PORT_EXPLICIT=1; fi
 PORT="${PORT:-3000}"
 SERVICE_NAME="botdeck"
 SERVICE_USER="${SERVICE_USER:-botdeck}"
@@ -179,9 +181,13 @@ if [ "$SRC_DIR" != "$APP_DIR" ]; then
       --exclude '.git' --exclude 'node_modules' --exclude 'data' --exclude 'bots' \
       --exclude '*.log' "$SRC_DIR/" "$APP_DIR/"
   else
+    # No rsync: copy with tar, never touching data/ or bots/ (live bot files and
+    # the panel database must survive an upgrade).
     find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name data ! -name bots -exec rm -rf {} +
-    cp -a "$SRC_DIR/." "$APP_DIR/"
-    rm -rf "$APP_DIR/.git" "$APP_DIR/node_modules" "$APP_DIR/data" "$APP_DIR/bots"
+    tar -C "$SRC_DIR" \
+      --exclude='./.git' --exclude='./node_modules' --exclude='./data' \
+      --exclude='./bots' --exclude='*.log' \
+      -cf - . | tar -C "$APP_DIR" -xf -
   fi
 fi
 mkdir -p "$APP_DIR/data/logs" "$APP_DIR/bots"
@@ -330,6 +336,65 @@ if [ -f "${APP_DIR}/data/panel.pid" ]; then
   fi
   rm -f "${APP_DIR}/data/panel.pid"
 fi
+
+# A port saved by `botdeck port <n>` survives upgrades unless PORT was passed.
+if [ -f "${APP_DIR}/data/port" ]; then
+  SAVED_PORT="$(cat "${APP_DIR}/data/port" 2>/dev/null || true)"
+  if [ "$PORT_EXPLICIT" = "1" ]; then
+    info "Clearing previously saved port ${SAVED_PORT} — using PORT=${PORT}"
+    rm -f "${APP_DIR}/data/port"
+  else
+    case "$SAVED_PORT" in
+      ''|*[!0-9]*) ;;
+      *)
+        PORT="$SAVED_PORT"
+        info "Using the port previously set with 'botdeck port': ${PORT}"
+        ;;
+    esac
+  fi
+fi
+
+# Stop any BotDeck process still running from this folder (older installs can
+# leave one behind with a different pid file / port).
+stop_all_panels() {
+  local pattern="${APP_DIR}/server.js" pids pid cmd exe filtered=""
+  command -v pgrep >/dev/null 2>&1 || return 0
+  pids="$(pgrep -f -- "$pattern" 2>/dev/null || true)"
+  [ -n "$pids" ] || return 0
+
+  for pid in $pids; do
+    # never touch ourselves / our parent shell
+    if [ "$pid" = "$$" ] || [ "$pid" = "${PPID:-0}" ] || [ "$pid" = "${BASHPID:-$$}" ]; then
+      continue
+    fi
+    cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+    case "$cmd" in
+      *install.sh*) continue ;;
+    esac
+    exe="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
+    case "$exe" in
+      *node*) filtered="$filtered $pid" ;;
+    esac
+  done
+
+  [ -n "$filtered" ] || return 0
+  info "Stopping running BotDeck process(es):${filtered}"
+  # shellcheck disable=SC2086
+  kill -TERM $filtered 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    local alive=""
+    for pid in $filtered; do
+      kill -0 "$pid" 2>/dev/null && alive="yes"
+    done
+    [ -z "$alive" ] && break
+    sleep 0.5
+  done
+  # shellcheck disable=SC2086
+  kill -KILL $filtered 2>/dev/null || true
+  sleep 0.3
+}
+
+stop_all_panels
 
 # Port in use? Move to the next free one instead of failing the install.
 if ! port_free "$PORT"; then

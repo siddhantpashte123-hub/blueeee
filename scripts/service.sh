@@ -72,10 +72,23 @@ cmd_start() {
 
   cd "$APP_DIR" || return 1
 
-  nohup env NODE_ENV=production PORT="$PORT" HOST=0.0.0.0 \
-    DATA_DIR="$APP_DIR/data" BOTS_DIR="$APP_DIR/bots" \
-    "$NODE_BIN" "$APP_DIR/server.js" >> "$LOG_FILE" 2>&1 < /dev/null &
-  echo $! > "$PID_FILE"
+  export NODE_ENV=production
+  export PORT
+  export HOST=0.0.0.0
+  export DATA_DIR="$APP_DIR/data"
+  export BOTS_DIR="$APP_DIR/bots"
+
+  rm -f "$PID_FILE"
+  # `setsid` gives the panel its own session, so Ctrl+C / closing the terminal /
+  # ending this su session cannot kill it. The child writes its own pid so the
+  # pid file is correct even if setsid forks.
+  local launcher=""
+  if command -v setsid >/dev/null 2>&1; then
+    launcher="setsid"
+  fi
+
+  nohup $launcher bash -c 'echo $$ > "$0"; exec "$1" "$2"' \
+    "$PID_FILE" "$NODE_BIN" "$APP_DIR/server.js" >> "$LOG_FILE" 2>&1 < /dev/null &
   sleep 2
 
   if is_running; then
