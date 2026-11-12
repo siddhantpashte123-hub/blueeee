@@ -116,8 +116,17 @@ async function load(modelId, { force = false } = {}) {
   }
   if (starting && !force) return starting;
 
-  const model = models.get(modelId || store.get().settings.modelId);
-  if (!model) throw Object.assign(new Error('Pehle koi model download karke select karein'), { status: 400 });
+  let wanted = modelId || store.get().settings.modelId;
+  if (!wanted) {
+    const pick = models.pickInstalled();
+    if (pick) wanted = pick.id;
+  }
+  const model = models.get(wanted);
+  if (!model)
+    throw Object.assign(
+      new Error('Koi model download nahi hai — Models page se Qwen2.5-Coder 1.5B download karein'),
+      { status: 400, code: 'no_model_installed' }
+    );
 
   const file = models.modelPath(model);
   try {
@@ -257,7 +266,13 @@ async function stop() {
 async function chat({ messages, temperature, maxTokens, stop: stopSeq, signal, onToken }) {
   if (!(await healthz(1500))) {
     if (state.status !== 'starting') {
-      throw Object.assign(new Error('Model load nahi hai — Models page se model load karein'), { status: 503 });
+      const pick = models.pickInstalled();
+      throw Object.assign(new Error('Model load nahi hai — Models page se model load karein'), {
+        status: 503,
+        code: 'engine_not_loaded',
+        modelId: pick ? pick.id : null,
+        modelName: pick ? pick.name : null
+      });
     }
   }
   const ctrl = new AbortController();
@@ -361,8 +376,24 @@ async function autostart() {
     state.error = state.status === 'ready' ? null : `${cfg.LLM_URL} se connect nahi hua`;
     return;
   }
-  if (!st.settings.modelId) return;
-  const m = models.get(st.settings.modelId);
+  let wantId = st.settings.modelId;
+  if (!wantId) {
+    // fresh install: disk par jo model pada hai use hi chuno aur load karo
+    try {
+      await models.refreshFromDisk();
+    } catch {}
+    const pick = models.pickInstalled();
+    if (!pick) {
+      log('koi model nahi mila — Models page se download karein');
+      return;
+    }
+    wantId = pick.id;
+    await store.update((s) => {
+      s.settings.modelId = pick.id;
+    });
+    log(`auto-select model: ${pick.name}`);
+  }
+  const m = models.get(wantId);
   if (!m) return;
   try {
     await load(m.id);

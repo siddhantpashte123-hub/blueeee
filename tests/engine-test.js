@@ -142,6 +142,15 @@ async function main() {
   check('installed list me hai', !!local, JSON.stringify(r.json.installed));
   check('modelId set hai', !!local.id);
 
+  console.log('\n[1c] Boot par model auto-load (fresh install fix)');
+  const autoReady = await waitFor(async () => {
+    const sys = await request('GET', '/api/system');
+    return !!(sys.json && sys.json.engine && sys.json.engine.status === 'ready');
+  }, 25000);
+  check('panel ne khud model load kiya', autoReady);
+  const autoSys = await request('GET', '/api/system');
+  check('auto-loaded model wahi hai', /tiny-fake/.test((autoSys.json.engine && autoSys.json.engine.modelName) || ''), JSON.stringify(autoSys.json.engine).slice(0, 160));
+
   console.log('\n[1b] RAM pre-flight guard');
   // 8 GB ka sparse "model" — is VPS ki RAM (chhoti) me fit nahi hona chahiye
   await fsp.writeFile(path.join(DATA, 'models', 'huge-fake.gguf'), '');
@@ -205,11 +214,54 @@ async function main() {
   check('done event aaya', !!done);
   check('tok/s mile (engine timings)', done && done.tokensPerSec > 0, done && done.tokensPerSec);
 
+  console.log('\n[3b] Engine band ho to clear error');
+  await request('POST', '/api/models/unload');
+  const noEngine = await new Promise((resolve) => {
+    const data = Buffer.from(JSON.stringify({ message: 'test' }));
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: PORT,
+        path: '/api/chat',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': data.length, Cookie: cookie }
+      },
+      (res) => {
+        let buf = '';
+        const events = [];
+        res.on('data', (c) => {
+          buf += c.toString();
+          let i;
+          while ((i = buf.indexOf('\n\n')) >= 0) {
+            const chunk = buf.slice(0, i);
+            buf = buf.slice(i + 2);
+            for (const line of chunk.split('\n')) {
+              if (!line.startsWith('data:')) continue;
+              try {
+                events.push(JSON.parse(line.slice(5)));
+              } catch {}
+            }
+          }
+        });
+        res.on('end', () => resolve(events));
+      }
+    );
+    req.on('error', () => resolve([]));
+    req.write(data);
+    req.end();
+  });
+  const errEv = noEngine.find((e) => e.type === 'error');
+  check('error event me code aaya', !!errEv && errEv.code === 'engine_not_loaded', JSON.stringify(errEv).slice(0, 200));
+  check('error me load karne wala model bata', !!errEv && /tiny-fake/.test(errEv.modelName || ''), JSON.stringify(errEv).slice(0, 200));
+
   console.log('\n[4] Unload');
+  r = await request('POST', '/api/models/load', { id: local.id });
+  check('retry par model wapas load hua', r.json.engine.status === 'ready', JSON.stringify(r.json.engine).slice(0, 160));
+  const pid2 = r.json.engine.pid;
   r = await request('POST', '/api/models/unload');
   check('unload ok', r.status === 200 && r.json.engine.status === 'idle', JSON.stringify(r.json.engine).slice(0, 120));
   await sleep(800);
-  check('engine process band hua', !alive(pid), String(pid));
+  check('engine process band hua', !alive(pid2), String(pid2));
   check('port free ho gaya', !(await waitFor(async () => false, 200)) || true);
 
   r = await request('POST', '/api/models/load', { id: local.id });

@@ -209,6 +209,8 @@ Backup = `data/` folder copy. Reinstall karne par `data/` nahi udta.
 |---|---|
 | `llama-server nahi mila` | `sudo bash scripts/install.sh` dobara (engine download step), ya `LLM_BIN=/path/to/llama-server` |
 | Model load hote hi band ho jata hai | Model RAM me fit nahi. Chhota model (1.5B/0.5B) lo, ya VM ki RAM badhao |
+| Chat me "Model load nahi hai" | Panel boot par khud model load karta hai. Fir bhi dikhe to chat me aaye **Model load karo aur bhejo** button dabao — ek click me load + message dobara chala jayega. RAM kam ho to wahi card **1.5B download karo** bhi offer karta hai |
+| "Ye model ~X GB RAM maangta hai" | VPS ki asli RAM (cgroup limit) kam hai. Card se recommended chhota model download karo — panel bada model load hone hi nahi dega (panel safe rahega) |
 | Load 180s me nahi hua | 7B CPU par slow hai — 1.5B try karo, ya `CTX_SIZE=2048` |
 | Bahut slow (1-2 tok/s) | CPU weak hai. Alpine/1.5B model, `THREADS=<cores>` check karo |
 | `Illegal instruction (core dumped)` | Binary AVX2 maang raha hai. Purane CPU par source se build karo, ya `SKIP_LLAMA=1` + apna binary |

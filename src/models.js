@@ -88,6 +88,29 @@ const recommendFor = () => {
   return CATALOG[2];
 };
 
+/**
+ * Disk par jo model pada hai usme se best chuno (RAM me fit hone wala sabse bada).
+ * Fresh install ke baad panel khud isse load kar leta hai.
+ */
+function pickInstalled() {
+  const st = store.get();
+  const ram = hostMemMb();
+  const all = (st.models || [])
+    .map((m) => {
+      let size = 0;
+      try {
+        size = fs.statSync(modelPath(m)).size;
+      } catch {}
+      return { ...m, size, exists: size > 0 };
+    })
+    .filter((m) => m.exists);
+  if (!all.length) return null;
+  const fits = all.filter((m) => Math.ceil((m.size * 1.15) / 1048576) + 512 <= ram);
+  const pool = fits.length ? fits : all;
+  pool.sort((a, b) => b.size - a.size);
+  return pool[0];
+}
+
 function list() {
   const st = store.get();
   const ram = hostMemMb();
@@ -226,4 +249,4 @@ function get(id) {
   return (st.models || []).find((m) => m.id === id) || null;
 }
 
-module.exports = { CATALOG, list, download, remove, get, modelPath, refreshFromDisk, downloads, recommendFor };
+module.exports = { CATALOG, list, pickInstalled, download, remove, get, modelPath, refreshFromDisk, downloads, recommendFor };

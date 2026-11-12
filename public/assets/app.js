@@ -12,6 +12,7 @@
     streaming: false,
     abortCtrl: null,
     streamBuf: '',
+    needModel: null, // { text, modelId, modelName } — engine load nahi hai
     tree: [],
     openFile: null,
     fileDirty: false,
@@ -399,6 +400,12 @@
     });
 
     $('#chat-inner').addEventListener('click', onChatClick);
+    const statsBar = $('#top-stats');
+    if (statsBar) {
+      statsBar.style.cursor = 'pointer';
+      statsBar.title = 'Models page kholo (model load / download)';
+      statsBar.addEventListener('click', () => openModels());
+    }
     renderAside();
   }
 
@@ -419,6 +426,19 @@
       const btn = e.target.closest('[data-sugg]');
       $('#prompt').value = btn.dataset.sugg;
       send();
+      return;
+    }
+    if (e.target.closest('[data-load-model]')) {
+      loadModelAndRetry(e.target.closest('[data-load-model]'));
+      return;
+    }
+    if (e.target.closest('[data-download-model]')) {
+      downloadModelAndLoad(e.target.closest('[data-download-model]'));
+      return;
+    }
+    if (e.target.closest('[data-open-models]')) {
+      openModels();
+      return;
     }
   }
 
@@ -478,6 +498,7 @@
   async function newChat() {
     S.chat = { id: null, title: 'Naya chat', messages: [], preset: $('#preset') ? $('#preset').value : 'engineer' };
     S.streamBuf = '';
+    S.needModel = null;
     $('#chat-title').textContent = 'Naya chat';
     renderChat();
     $('#prompt').focus();
@@ -548,6 +569,33 @@
           </div>`
         )
         .join('') +
+      (S.needModel
+        ? `<div class="msg ai">
+             <div class="avatar">!</div>
+             <div class="bubble">
+               <div class="who">Forge · engine ready nahi</div>
+               <div class="engine-cta">
+                 <b>Model load nahi hai — pehle model load karna hoga</b>
+                 <span>${
+                   S.needModel.modelName
+                     ? `${esc(S.needModel.modelName)} VPS par pada hai. Ek click me load hoke aapka message dobara chala jayega.`
+                     : 'Models page se Qwen2.5-Coder 1.5B (ya jo aapke RAM me fit ho) download karein.'
+                 }</span>
+                 <div class="row">
+                   ${S.needModel.modelId ? '<button class="btn primary sm" data-load-model="1">Model load karo aur bhejo</button>' : ''}
+                   ${
+                     S.needModel.suggest
+                       ? `<button class="btn ${S.needModel.modelId ? '' : 'primary'} sm" data-download-model="1">${esc(
+                           S.needModel.suggest.name
+                         )} (${esc(S.needModel.suggest.sizeText || '')}) download karo</button>`
+                       : ''
+                   }
+                   <button class="btn sm" data-open-models="1">Models page kholo</button>
+                 </div>
+               </div>
+             </div>
+           </div>`
+        : '') +
       (S.streaming || S.streamBuf
         ? `<div class="msg ai streaming" id="stream-msg">
              <div class="avatar">AI</div>
@@ -581,6 +629,117 @@
   }
 
   // ------------------------------------------------------------- send / stream
+  /** RAM kam ho to chhota model suggest karo */
+  async function suggestSmallerModel() {
+    if (!S.needModel) return;
+    try {
+      const d = await api('/api/models');
+      S.models = d;
+      const cat = d.catalog || [];
+      const rec =
+        cat.find((c) => c.id === d.recommend && !c.installed) ||
+        cat.find((c) => c.fits && !c.installed && /1\.5b|3b/i.test(c.id)) ||
+        cat.find((c) => c.fits && !c.installed);
+      if (!rec) return;
+      if (S.needModel.modelId === rec.id) return;
+      S.needModel.suggest = { id: rec.id, name: rec.name, sizeText: rec.sizeText };
+      renderChat();
+    } catch {}
+  }
+
+  /** Suggest kiya model download karo, phir load karke message bhejo */
+  async function downloadModelAndLoad(btn) {
+    const sug = S.needModel && S.needModel.suggest;
+    if (!sug || S.streaming) return;
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'download shuru ho raha hai…';
+    try {
+      await api('/api/models/download', { method: 'POST', body: { id: sug.id } });
+    } catch (e) {
+      toast(e.message, 'err');
+      btn.disabled = false;
+      btn.textContent = label;
+      return;
+    }
+    const started = Date.now();
+    while (Date.now() - started < 25 * 60 * 1000) {
+      await new Promise((r) => setTimeout(r, 3000));
+      let d;
+      try {
+        d = await api('/api/models');
+      } catch {
+        continue;
+      }
+      const cat = (d.catalog || []).find((c) => c.id === sug.id) || {};
+      const dl = cat.download;
+      if (dl && dl.error) {
+        toast('Download fail: ' + dl.error, 'err');
+        break;
+      }
+      if (cat.installed && (!dl || dl.done)) {
+        toast(`${sug.name} download ho gaya — ab load kar raha hoon`, 'ok');
+        S.needModel = { ...S.needModel, modelId: sug.id, modelName: sug.name, suggest: null };
+        renderChat();
+        const b = document.querySelector('[data-load-model]');
+        await loadModelAndRetry(b);
+        return;
+      }
+      if (dl && dl.total) btn.textContent = `download ${Math.round((dl.received / dl.total) * 100)}%`;
+      else if (dl) btn.textContent = `download ${fmtBytes(dl.received)}`;
+      else btn.textContent = 'download taiyari me…';
+    }
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+
+  /** Model load karo, phir wahi message dobara bhejo */
+  async function loadModelAndRetry(btn) {
+    if (!S.needModel || S.streaming) return;
+    const id = S.needModel.modelId;
+    if (!id) return openModels();
+    const old = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'load ho raha hai… (30-60s)';
+    }
+    try {
+      const r = await api('/api/models/load', { method: 'POST', body: { id } });
+      await refreshSystem();
+      if (r.engine && r.engine.status === 'ready') {
+        toast('Model ready — aapka message dobara bhej raha hoon', 'ok');
+        await retrySend();
+        return;
+      }
+      toast((r.engine && r.engine.error) || 'Model load nahi hua — logs dekhein', 'err');
+    } catch (e) {
+      toast(e.message, 'err');
+      if (/RAM|GB|fit/i.test(e.message)) await suggestSmallerModel();
+    }
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  }
+
+  /** Fail hua message dubara bhejo (duplicate user bubble ke bina) */
+  async function retrySend() {
+    const p = S.needModel;
+    if (!p || S.streaming) return;
+    const msgs = (S.chat && S.chat.messages) || [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') {
+        msgs.splice(i, 1);
+        break;
+      }
+    }
+    S.needModel = null;
+    if (S.chat) S.chat.id = S.chat.id || null;
+    $('#prompt').value = p.text;
+    renderChat();
+    await send();
+  }
+
   async function send() {
     const ta = $('#prompt');
     const text = ta.value.trim();
@@ -669,6 +828,9 @@
               doneData = ev;
             } else if (ev.type === 'error') {
               toast(ev.error, 'err');
+              if (ev.code === 'engine_not_loaded' || /Model load nahi hai/.test(ev.error || '')) {
+                S.needModel = { text, modelId: ev.modelId || null, modelName: ev.modelName || null };
+              }
             }
           }
         }
@@ -704,6 +866,7 @@
       }
     }
     await loadChats();
+    if (S.needModel && !S.needModel.modelId) await suggestSmallerModel();
   }
 
   function finishStream() {

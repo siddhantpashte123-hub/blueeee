@@ -257,6 +257,20 @@ async function main() {
   check('naya chat khula', !!doc.querySelector('.empty-chat'));
   check('chat list me item hai', doc.querySelectorAll('.chat-item').length >= 1);
 
+  console.log('\n[7] Engine band — chat me fix button');
+  try {
+    mock.kill('SIGKILL');
+  } catch {}
+  await sleep(500);
+  doc.querySelector('#prompt').value = 'engine band test';
+  doc.querySelector('#btn-send').click();
+  const cta = await waitFor(() => !!doc.querySelector('.engine-cta'), 15000);
+  check('engine CTA card dikha', cta, (doc.querySelector('#chat-inner') || {}).textContent?.slice(0, 160));
+  check('CTA me "load karo" button hai', !!doc.querySelector('[data-load-model]') || !!doc.querySelector('[data-download-model]'));
+  check('CTA me models page button hai', !!doc.querySelector('[data-open-models]'));
+  const dlBtn = doc.querySelector('[data-download-model]');
+  check('suggest model download button aaya', !!dlBtn, (doc.querySelector('.engine-cta') || {}).textContent?.slice(0, 160));
+
   dom.window.close();
   finish();
 }

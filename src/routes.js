@@ -354,7 +354,13 @@ function build(req) {
       });
     } catch (e) {
       clearInterval(keepAlive);
-      send({ type: 'error', error: e.message });
+      send({
+        type: 'error',
+        error: e.message,
+        code: e.code || null,
+        modelId: e.modelId || null,
+        modelName: e.modelName || null
+      });
       res.end();
       return;
     }
