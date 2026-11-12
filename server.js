@@ -1,7 +1,7 @@
 'use strict';
 /**
- * VPSDeck — panel entrypoint.
- * Ek hi Node process: HTTP server + QEMU orchestration. Koi npm dependency nahi.
+ * Forge — local AI code studio. Ek Node process, koi npm dependency nahi.
+ * Panel :4040 par, engine (llama-server) andar 127.0.0.1:4055 par.
  */
 const http = require('http');
 const fs = require('fs');
@@ -12,10 +12,10 @@ const store = require('./src/store');
 const auth = require('./src/auth');
 const Router = require('./src/router');
 const routes = require('./src/routes');
-const vms = require('./src/vms');
-const qemu = require('./src/qemu');
-const serial = require('./src/serial');
-const { ensureDir } = require('./src/util');
+const llm = require('./src/llm');
+const models = require('./src/models');
+const project = require('./src/project');
+const { ensureDir, memInfo, fmtBytes } = require('./src/util');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const MIME = {
@@ -24,10 +24,9 @@ const MIME = {
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.json': 'application/json; charset=utf-8',
-  '.ico': 'image/x-icon',
   '.png': 'image/png',
-  '.woff2': 'font/woff2',
-  '.map': 'application/json'
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2'
 };
 
 async function serveStatic(req, res, pathname) {
@@ -38,11 +37,10 @@ async function serveStatic(req, res, pathname) {
   try {
     const st = await fsp.stat(abs);
     if (!st.isFile()) return false;
-    const ext = path.extname(abs).toLowerCase();
     res.writeHead(200, {
-      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Content-Type': MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream',
       'Content-Length': st.size,
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=300'
+      'Cache-Control': path.extname(abs) === '.html' ? 'no-cache' : 'public, max-age=300'
     });
     fs.createReadStream(abs).pipe(res);
     return true;
@@ -51,50 +49,43 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
-function banner(port, e) {
-  const mode = e && e.kvm ? 'KVM (hardware accel)' : 'TCG (software mode — slow but works)';
-  const setup = auth.needsSetup() ? 'YES — pehli baar password set karein' : 'no';
-  const lines = [
-    '',
-    '  \x1b[36m╔══════════════════════════════════════════╗\x1b[0m',
-    '  \x1b[36m║\x1b[0m  \x1b[1mVPSDeck\x1b[0m — apna VPS ke andar VPS        \x1b[36m║\x1b[0m',
-    '  \x1b[36m╚══════════════════════════════════════════╝\x1b[0m',
-    `  Panel      : http://${cfg.HOST === '0.0.0.0' ? 'localhost' : cfg.HOST}:${port}`,
-    `  Data dir   : ${cfg.DATA_DIR}`,
-    `  QEMU       : ${e && e.version ? e.version : 'NOT FOUND'}`,
-    `  Accel      : ${mode}`,
-    `  First run  : ${setup}`,
-    ''
-  ];
-  console.log(lines.join('\n'));
-  if (!e || !e.ready) {
-    console.log(
-      '  \x1b[33m⚠ QEMU install nahi hai. Chalao:\x1b[0m sudo apt install -y qemu-system-x86 qemu-utils\n'
-    );
-  } else if (!e.kvm) {
-    console.log(
-      '  \x1b[33m⚠ /dev/kvm nahi mila — VMs software mode me chalenge (slow).\n' +
-        '    Hosting provider se "nested virtualization" on karwayein to 10x fast ho jayega.\x1b[0m\n'
-    );
+function banner(engine) {
+  const mem = memInfo();
+  const cols = (s) => `\x1b[36m${s}\x1b[0m`;
+  console.log(
+    [
+      '',
+      `  ${cols('╔════════════════════════════════════════════╗')}`,
+      `  ${cols('║')}  \x1b[1mFORGE\x1b[0m — local AI code studio             ${cols('║')}`,
+      `  ${cols('╚════════════════════════════════════════════╝')}`,
+      `  Panel    : http://localhost:${cfg.PORT}`,
+      `  Engine   : ${engine.mode === 'external' ? cfg.LLM_URL : engine.bin || 'llama-server NOT FOUND'}`,
+      `  Model    : ${llm.state.modelName || (store.get().settings.modelId ? '(load ho raha hai)' : 'koi model load nahi')}`,
+      `  RAM      : ${fmtBytes(mem.free)} free / ${fmtBytes(mem.total)}`,
+      `  Threads  : ${cfg.THREADS}  ·  ctx ${cfg.CTX_SIZE}`,
+      `  Workspace: ${cfg.WORKSPACE_DIR}`,
+      `  First run: ${auth.needsSetup() ? 'YES — password set karein' : 'no'}`,
+      ''
+    ].join('\n')
+  );
+  if (!engine.bin && engine.mode === 'local') {
+    console.log('  \x1b[33m⚠ llama-server nahi mila. Installer chalayein:\x1b[0m sudo bash scripts/install.sh\n');
   }
 }
 
 async function main() {
-  await ensureDir(cfg.DATA_DIR);
-  for (const d of [cfg.VMS_DIR, cfg.IMAGES_DIR, cfg.LOG_DIR]) await ensureDir(d);
+  for (const d of [cfg.DATA_DIR, cfg.MODELS_DIR, cfg.CHATS_DIR, cfg.BIN_DIR, cfg.WORKSPACE_DIR]) await ensureDir(d);
   await store.init();
+  await project.init();
+  await models.refreshFromDisk();
 
-  const server = {
-    router: new Router()
-  };
+  const server = { router: new Router() };
   routes.build(server);
 
   const httpServer = http.createServer(async (req, res) => {
-    const started = Date.now();
     let pathname = '/';
     try {
-      const u = new URL(req.url, 'http://localhost');
-      pathname = u.pathname;
+      pathname = new URL(req.url, 'http://localhost').pathname;
     } catch {}
 
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -107,19 +98,20 @@ async function main() {
         await m.handler(req, res, { params: m.params });
       } catch (e) {
         if (!res.headersSent) routes.fail(res, e);
-        else res.end();
+        else {
+          try {
+            res.end();
+          } catch {}
+        }
       }
       return;
     }
 
     if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405, { 'Content-Type': 'text/plain' });
-      return res.end('Method not allowed');
+      res.writeHead(405).end('Method not allowed');
+      return;
     }
-
     if (await serveStatic(req, res, pathname)) return;
-
-    // SPA fallback
     if (!path.extname(pathname)) {
       try {
         const html = await fsp.readFile(path.join(PUBLIC_DIR, 'index.html'));
@@ -128,44 +120,39 @@ async function main() {
       } catch {}
     }
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('404 — page nahi mila');
+    res.end('404');
   });
 
-  httpServer.on('clientError', (err, socket) => {
-    try {
-      socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
-    } catch {}
-  });
+  httpServer.requestTimeout = 0;
+  httpServer.headersTimeout = 0;
+  httpServer.keepAliveTimeout = 65000;
 
   httpServer.listen(cfg.PORT, cfg.HOST, async () => {
-    const e = await qemu.env();
-    banner(cfg.PORT, e);
-    if (e.ready) {
-      // pehle se chal rahe VMs se judo + autostart
-      vms.boot().catch((err) => console.error('[boot]', err.message));
-    }
+    const engine = await llm.engineInfo();
+    banner(engine);
+    // model pehle se selected hai to background me load karo
+    llm.autostart().catch((e) => console.error('[engine]', e.message));
   });
 
   const shutdown = async (sig) => {
-    console.log(`\n[panel] ${sig} mila — band ho raha hoon (VMs chalte rahenge)`);
+    console.log(`\n[panel] ${sig} — band ho raha hoon`);
+    llm.stopAll();
     try {
-      await store.flush();
+      await llm.stop();
     } catch {}
-    serial.dropAll();
+    try {
+      await store.save();
+    } catch {}
     httpServer.close();
-    setTimeout(() => process.exit(0), 400);
+    setTimeout(() => process.exit(0), 300);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('unhandledRejection', (err) => {
-    console.error('[unhandledRejection]', err && err.message ? err.message : err);
-  });
-  process.on('uncaughtException', (err) => {
-    console.error('[uncaughtException]', err && err.stack ? err.stack : err);
-  });
+  process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e && e.message));
+  process.on('uncaughtException', (e) => console.error('[uncaughtException]', e && e.stack));
 }
 
-main().catch((err) => {
-  console.error('Panel start nahi hua:', err);
+main().catch((e) => {
+  console.error('Panel start nahi hua:', e);
   process.exit(1);
 });

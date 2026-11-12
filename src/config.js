@@ -1,58 +1,50 @@
 'use strict';
-/**
- * VPSDeck config — saara path/limit yahin se aata hai.
- * Env vars se override kar sakte hain (installer inhe set karta hai).
- */
+/** Forge config — sab kuch env se override ho sakta hai. */
 const path = require('path');
 
 const APP_DIR = path.resolve(process.env.APP_DIR || path.join(__dirname, '..'));
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(APP_DIR, 'data'));
 
-const cleanPort = (v, def) => {
+const int = (v, def) => {
   const n = parseInt(v, 10);
-  return Number.isFinite(n) && n > 0 && n < 65536 ? n : def;
+  return Number.isFinite(n) && n > 0 ? n : def;
 };
 
 module.exports = {
   APP_DIR,
   DATA_DIR,
-  VMS_DIR: path.join(DATA_DIR, 'vms'),
-  IMAGES_DIR: path.join(DATA_DIR, 'images'),
-  SEEDS_DIR: path.join(DATA_DIR, 'seeds'),
-  LOG_DIR: path.join(DATA_DIR, 'logs'),
+  MODELS_DIR: path.join(DATA_DIR, 'models'),
+  WORKSPACE_DIR: process.env.WORKSPACE_DIR
+    ? path.resolve(process.env.WORKSPACE_DIR)
+    : path.join(DATA_DIR, 'workspace'),
+  CHATS_DIR: path.join(DATA_DIR, 'chats'),
+  BIN_DIR: path.join(DATA_DIR, 'bin'),
   PANEL_JSON: path.join(DATA_DIR, 'panel.json'),
 
   HOST: process.env.HOST || '0.0.0.0',
-  PORT: cleanPort(process.env.PORT, 8080),
+  PORT: int(process.env.PORT, 4040),
 
-  // Session / auth
+  // Andar chalne wala llama-server
+  LLM_PORT: int(process.env.LLM_PORT, 4055),
+  LLM_HOST: '127.0.0.1',
+  // Agar pehle se koi OpenAI-compatible server chal raha hai (llama.cpp / Ollama / vLLM)
+  LLM_URL: process.env.LLM_URL || '',
+
+  // Model defaults
+  CTX_SIZE: int(process.env.CTX_SIZE, 4096),
+  THREADS: int(process.env.THREADS, Math.max(2, Math.min(6, require('os').cpus().length))),
+  DEFAULT_MAX_TOKENS: int(process.env.MAX_TOKENS, 1600),
+  TEMPERATURE: Number(process.env.TEMPERATURE || 0.2),
+
   SESSION_TTL: 7 * 24 * 60 * 60 * 1000,
   LOGIN_WINDOW: 5 * 60 * 1000,
-  LOGIN_MAX_TRIES: 10,
+  LOGIN_MAX_TRIES: 12,
 
-  // SSH forward ports (host -> guest 22), sirf localhost pe bind hote hain
-  SSH_PORT_BASE: cleanPort(process.env.SSH_PORT_BASE, 22000),
-  SSH_PORT_MAX: cleanPort(process.env.SSH_PORT_MAX, 22999),
+  MAX_JSON_BODY: 4 * 1024 * 1024,
+  MAX_FILE_BYTES: 512 * 1024,
+  MAX_CONTEXT_FILES: 12,
+  MAX_UPLOAD_BYTES: 200 * 1024 * 1024,
 
-  // VM defaults
-  DEFAULT_CPU: 2,
-  DEFAULT_MEM_MB: 1024,
-  DEFAULT_DISK_GB: 10,
-  MAX_CPU: 8,
-  MAX_MEM_MB: 32768,
-  MAX_DISK_GB: 500,
-  MAX_VMS: 200,
-
-  // Limits
-  MAX_JSON_BODY: 2 * 1024 * 1024,
-  MAX_ISO_BYTES: 16 * 1024 * 1024 * 1024,
-  SERIAL_BUFFER_BYTES: 128 * 1024,
-  MAX_IMAGE_DOWNLOAD_BYTES: 12 * 1024 * 1024 * 1024,
-
-  QEMU_BIN: process.env.QEMU_BIN || 'qemu-system-x86_64',
-  QEMU_IMG: process.env.QEMU_IMG || 'qemu-img',
-  QEMU_MACHINE: process.env.QEMU_MACHINE || 'q35',
-
-  STOP_TIMEOUT_MS: 25000,
-  BOOT_GRACE_MS: 1200
+  LLM_START_TIMEOUT: int(process.env.LLM_START_TIMEOUT, 180000),
+  NO_AUTH: process.env.NO_AUTH === '1'
 };

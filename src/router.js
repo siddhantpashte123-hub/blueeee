@@ -1,6 +1,5 @@
 'use strict';
-/** Minimal router — bas pattern match karta hai (koi dependency nahi). */
-
+/** Chhota router — pattern matching, koi dependency nahi. */
 class Router {
   constructor() {
     this.routes = [];
@@ -22,21 +21,11 @@ class Router {
     return this;
   }
 
-  get(p, h) {
-    return this.add('GET', p, h);
-  }
-  post(p, h) {
-    return this.add('POST', p, h);
-  }
-  patch(p, h) {
-    return this.add('PATCH', p, h);
-  }
-  put(p, h) {
-    return this.add('PUT', p, h);
-  }
-  delete(p, h) {
-    return this.add('DELETE', p, h);
-  }
+  get(p, h) { return this.add('GET', p, h); }
+  post(p, h) { return this.add('POST', p, h); }
+  put(p, h) { return this.add('PUT', p, h); }
+  patch(p, h) { return this.add('PATCH', p, h); }
+  delete(p, h) { return this.add('DELETE', p, h); }
 
   match(method, pathname) {
     for (const r of this.routes) {

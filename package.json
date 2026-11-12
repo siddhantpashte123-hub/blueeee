@@ -1,22 +1,22 @@
 {
-  "name": "vpsdeck",
+  "name": "forge",
   "version": "1.0.0",
-  "description": "VPSDeck - Docker ke bina, apne VPS ke andar multiple QEMU virtual machines banane ka panel",
+  "description": "Forge \u2014 local AI code studio. Apne VPS par chalta hai, apna model, apna code.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node tests/iso-test.js && node tests/lifecycle-test.js && node tests/ui-smoke.js"
+    "test": "node tests/api-test.js && node tests/engine-test.js && node tests/ui-smoke.js"
   },
   "engines": {
     "node": ">=18"
   },
   "keywords": [
-    "vps",
-    "kvm",
-    "qemu",
-    "panel",
-    "virtualization"
+    "local-llm",
+    "code-generation",
+    "llama.cpp",
+    "ai",
+    "ide"
   ],
   "license": "MIT",
   "dependencies": {}

@@ -1,11 +1,11 @@
 'use strict';
-/** Login: scrypt password hash + in-memory sessions + cookie. */
+/** Password (scrypt) + in-memory sessions. NO_AUTH=1 se bilkul band. */
 const crypto = require('crypto');
-const { SESSION_TTL, LOGIN_MAX_TRIES, LOGIN_WINDOW } = require('./config');
+const cfg = require('./config');
 const store = require('./store');
 
-const sessions = new Map(); // token -> { user, expires, created, ip }
-const tries = new Map(); // ip -> { count, ts }
+const sessions = new Map();
+const tries = new Map();
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16);
@@ -15,14 +15,14 @@ function hashPassword(password) {
 
 function verifyPassword(password, stored) {
   try {
-    const parts = String(stored || '').split('$');
-    // scrypt $ N $ r $ p $ salt $ hash
-    const N = parseInt(parts[1], 10) || 16384;
-    const r = parseInt(parts[2], 10) || 8;
-    const p = parseInt(parts[3], 10) || 1;
-    const salt = Buffer.from(parts[4], 'base64');
-    const want = Buffer.from(parts[5], 'base64');
-    const got = crypto.scryptSync(String(password), salt, want.length, { N, r, p });
+    const p = String(stored || '').split('$');
+    const salt = Buffer.from(p[4], 'base64');
+    const want = Buffer.from(p[5], 'base64');
+    const got = crypto.scryptSync(String(password), salt, want.length, {
+      N: parseInt(p[1], 10) || 16384,
+      r: parseInt(p[2], 10) || 8,
+      p: parseInt(p[3], 10) || 1
+    });
     return crypto.timingSafeEqual(want, got);
   } catch {
     return false;
@@ -30,6 +30,7 @@ function verifyPassword(password, stored) {
 }
 
 function needsSetup() {
+  if (cfg.NO_AUTH) return false;
   const st = store.get();
   return !st.auth || !st.auth.hash;
 }
@@ -37,9 +38,7 @@ function needsSetup() {
 async function setPassword(password, user = 'admin') {
   const pw = String(password || '');
   if (pw.length < 6) {
-    const e = new Error('Password kam se kam 6 characters ka hona chahiye');
-    e.status = 400;
-    throw e;
+    throw Object.assign(new Error('Password kam se kam 6 characters ka hona chahiye'), { status: 400 });
   }
   await store.update((st) => {
     st.auth = { user, hash: hashPassword(pw), updatedAt: Date.now() };
@@ -50,59 +49,27 @@ async function setPassword(password, user = 'admin') {
 function rateLimited(ip) {
   const rec = tries.get(ip);
   if (!rec) return false;
-  if (Date.now() - rec.ts > LOGIN_WINDOW) {
+  if (Date.now() - rec.ts > cfg.LOGIN_WINDOW) {
     tries.delete(ip);
     return false;
   }
-  return rec.count >= LOGIN_MAX_TRIES;
+  return rec.count >= cfg.LOGIN_MAX_TRIES;
 }
-
 function bumpTry(ip) {
   const rec = tries.get(ip);
-  if (!rec || Date.now() - rec.ts > LOGIN_WINDOW) {
-    tries.set(ip, { count: 1, ts: Date.now() });
-  } else {
-    rec.count++;
-  }
+  if (!rec || Date.now() - rec.ts > cfg.LOGIN_WINDOW) tries.set(ip, { count: 1, ts: Date.now() });
+  else rec.count++;
 }
-
-function clearTries(ip) {
-  tries.delete(ip);
-}
+const clearTries = (ip) => tries.delete(ip);
 
 function createSession(user, ip) {
-  const token = crypto.randomBytes(32).toString('base64url');
-  sessions.set(token, { user, ip, created: Date.now(), expires: Date.now() + SESSION_TTL });
-  // purane expired sessions saaf
-  for (const [t, s] of sessions) if (s.expires < Date.now()) sessions.delete(t);
-  return token;
+  const t = crypto.randomBytes(32).toString('base64url');
+  sessions.set(t, { user, ip, created: Date.now(), expires: Date.now() + cfg.SESSION_TTL });
+  for (const [k, s] of sessions) if (s.expires < Date.now()) sessions.delete(k);
+  return t;
 }
 
-function destroySession(token) {
-  if (token) sessions.delete(token);
-}
-
-function sessionFromReq(req) {
-  const cookie = parseCookies(req.headers.cookie || '');
-  let token = cookie.bd_vps_session || cookie.vpsdeck_session || '';
-  const authz = String(req.headers.authorization || '');
-  if (authz.toLowerCase().startsWith('bearer ')) token = authz.slice(7).trim();
-  if (!token) {
-    try {
-      const u = new URL(req.url, 'http://x');
-      token = u.searchParams.get('token') || '';
-    } catch {}
-  }
-  if (!token) return null;
-  const s = sessions.get(token);
-  if (!s) return null;
-  if (s.expires < Date.now()) {
-    sessions.delete(token);
-    return null;
-  }
-  s.expires = Date.now() + SESSION_TTL;
-  return { ...s, token };
-}
+const destroySession = (t) => t && sessions.delete(t);
 
 function parseCookies(str) {
   const out = {};
@@ -115,25 +82,34 @@ function parseCookies(str) {
   return out;
 }
 
-function sessionCookie(token, secure) {
-  const parts = [
-    `bd_vps_session=${token}`,
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Lax',
-    `Max-Age=${Math.floor(SESSION_TTL / 1000)}`
-  ];
+function sessionFromReq(req) {
+  if (cfg.NO_AUTH) return { user: 'local', token: 'noauth', expires: Date.now() + 1e9 };
+  let t = parseCookies(req.headers.cookie || '').forge_session || '';
+  const authz = String(req.headers.authorization || '');
+  if (authz.toLowerCase().startsWith('bearer ')) t = authz.slice(7).trim();
+  if (!t) {
+    try {
+      t = new URL(req.url, 'http://x').searchParams.get('token') || '';
+    } catch {}
+  }
+  if (!t) return null;
+  const s = sessions.get(t);
+  if (!s) return null;
+  if (s.expires < Date.now()) {
+    sessions.delete(t);
+    return null;
+  }
+  s.expires = Date.now() + cfg.SESSION_TTL;
+  return { ...s, token: t };
+}
+
+function sessionCookie(t, secure) {
+  const parts = [`forge_session=${t}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Max-Age=${Math.floor(cfg.SESSION_TTL / 1000)}`];
   if (secure) parts.push('Secure');
   return parts.join('; ');
 }
 
-function clearCookie() {
-  return 'bd_vps_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0';
-}
-
-function sessionCount() {
-  return sessions.size;
-}
+const clearCookie = () => 'forge_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0';
 
 module.exports = {
   needsSetup,
@@ -148,6 +124,5 @@ module.exports = {
   sessionFromReq,
   sessionCookie,
   clearCookie,
-  parseCookies,
-  sessionCount
+  parseCookies
 };

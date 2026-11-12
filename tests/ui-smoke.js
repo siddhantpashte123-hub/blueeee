@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * UI smoke test (jsdom): login → dashboard → VM page → images → settings → share console.
- * Chalane ke liye: npm i --no-save jsdom && node tests/ui-smoke.js
+ * UI smoke test (jsdom) — login → chat → streaming → apply → editor → preview → modals.
+ *   npm i --no-save jsdom && node tests/ui-smoke.js
  */
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const http = require('http');
 const fs = require('fs');
 const fsp = fs.promises;
@@ -12,8 +12,9 @@ const path = require('path');
 const os = require('os');
 
 const ROOT = path.join(__dirname, '..');
-const DATA = path.join(os.tmpdir(), `vpsdeck-ui-${Date.now()}`);
-const PORT = 3900 + Math.floor(Math.random() * 90);
+const DATA = path.join(os.tmpdir(), `forge-ui-${Date.now()}`);
+const PORT = 4700 + Math.floor(Math.random() * 200);
+const LLM_PORT = PORT + 500;
 const BASE = `http://127.0.0.1:${PORT}`;
 
 let pass = 0;
@@ -24,14 +25,14 @@ function check(name, cond, extra) {
     console.log(`  \x1b[32m✓\x1b[0m ${name}`);
   } else {
     failures.push(name);
-    console.log(`  \x1b[31m✗\x1b[0m ${name}${extra ? ' — ' + String(extra).slice(0, 220) : ''}`);
+    console.log(`  \x1b[31m✗\x1b[0m ${name}${extra ? ' — ' + String(extra).slice(0, 240) : ''}`);
   }
 }
 
 let cookie = '';
-function httpReq(method, urlPath, body, raw = false) {
+function httpReq(method, urlPath, body) {
   return new Promise((resolve, reject) => {
-    const data = body === undefined ? null : raw ? body : Buffer.from(JSON.stringify(body));
+    const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
     const req = http.request(
       {
         host: '127.0.0.1',
@@ -41,7 +42,7 @@ function httpReq(method, urlPath, body, raw = false) {
         headers: Object.assign(
           {},
           cookie ? { Cookie: cookie } : {},
-          data ? { 'Content-Type': raw ? 'application/octet-stream' : 'application/json', 'Content-Length': data.length } : {}
+          data ? { 'Content-Type': 'application/json', 'Content-Length': data.length } : {}
         )
       },
       (res) => {
@@ -66,8 +67,7 @@ function httpReq(method, urlPath, body, raw = false) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function waitUntil(fn, timeout = 8000, step = 100) {
+async function waitFor(fn, timeout = 12000, step = 150) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
     try {
@@ -79,48 +79,41 @@ async function waitUntil(fn, timeout = 8000, step = 100) {
 }
 
 async function main() {
-  let JSDOM;
+  let JSDOM, VirtualConsole;
   try {
-    JSDOM = require('jsdom').JSDOM;
+    ({ JSDOM, VirtualConsole } = require('jsdom'));
   } catch {
-    console.log('jsdom install nahi hai — chalao: npm i --no-save jsdom');
+    console.log('jsdom nahi hai — npm i --no-save jsdom');
     process.exit(2);
   }
   await fsp.mkdir(DATA, { recursive: true });
 
+  const mock = spawn(process.execPath, [path.join(ROOT, 'tests/mock-llm.js'), String(LLM_PORT)], { stdio: 'ignore' });
   const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
     cwd: ROOT,
     env: Object.assign({}, process.env, {
       DATA_DIR: DATA,
       PORT: String(PORT),
       HOST: '127.0.0.1',
-      QEMU_BIN: path.join(ROOT, 'tests/mock-qemu.js'),
-      QEMU_IMG: path.join(ROOT, 'tests/mock-qemu-img.js')
+      LLM_URL: `http://127.0.0.1:${LLM_PORT}`
     }),
     stdio: ['ignore', 'pipe', 'pipe']
   });
-  let log = '';
-  server.stdout.on('data', (d) => (log += d));
-  server.stderr.on('data', (d) => (log += d));
+  let srvOut = '';
+  server.stdout.on('data', (d) => (srvOut += d));
+  server.stderr.on('data', (d) => (srvOut += d));
   const cleanup = () => {
     try {
       server.kill('SIGTERM');
     } catch {}
     try {
-      for (const v of fs.readdirSync(path.join(DATA, 'vms'))) {
-        try {
-          const pid = parseInt(fs.readFileSync(path.join(DATA, 'vms', v, 'qemu.pid'), 'utf8'), 10);
-          if (pid) process.kill(pid, 'SIGKILL');
-        } catch {}
-      }
+      mock.kill('SIGTERM');
     } catch {}
   };
   process.on('exit', cleanup);
 
-  const ok = await waitUntil(async () => false, 300);
-  // server up?
   let up = false;
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 60; i++) {
     try {
       const r = await httpReq('GET', '/api/health');
       if (r.status === 200) {
@@ -130,151 +123,136 @@ async function main() {
     } catch {}
     await sleep(150);
   }
-  check('panel start hua', up, log.slice(-200));
+  check('panel start hua', up, srvOut.slice(-200));
   if (!up) return finish();
 
-  // seed data via API
-  await httpReq('POST', '/api/auth/setup', { password: 'testpass123' });
-  const img = Buffer.alloc(4096, 3);
-  const up2 = await httpReq('POST', '/api/images/upload?name=ui-base.img', img, true);
-  const imageId = up2.json.image.id;
-  const created = await httpReq('POST', '/api/vms', {
-    name: 'ui-demo',
-    imageId,
-    cpu: 2,
-    memMB: 512,
-    diskGB: 5,
-    user: 'ubuntu',
-    password: 'secret12345'
-  });
-  const vm = created.json.vm;
-  await httpReq('POST', `/api/vms/${vm.id}/start`);
-  await sleep(600);
+  await httpReq('POST', '/api/auth/setup', { password: 'forge123456' });
+  cookie = ''; // login screen test karne ke liye
 
-  // jsdom boot — pehle cookie clear, taaki login screen test ho
-  cookie = '';
-  const { VirtualConsole } = require('jsdom');
   const vc = new VirtualConsole();
-  vc.on('jsdomError', (e) => console.log('  [jsdom error]', e.message));
-  vc.on('error', (...a) => console.log('  [console.error]', ...a));
+  vc.on('jsdomError', (e) => {
+    if (!/Not implemented/.test(e.message)) console.log('  [jsdom]', e.message);
+  });
+
   const dom = new JSDOM(await fsp.readFile(path.join(ROOT, 'public/index.html'), 'utf8'), {
     url: `${BASE}/`,
     runScripts: 'dangerously',
     pretendToBeVisual: true,
-    resources: undefined,
     virtualConsole: vc,
     beforeParse(window) {
       window.fetch = (url, opts = {}) => {
         const abs = String(url).startsWith('http') ? String(url) : BASE + String(url);
         const headers = Object.assign({}, opts.headers || {});
         if (cookie) headers['Cookie'] = cookie;
-        return globalThis
-          .fetch(abs, Object.assign({}, opts, { headers }))
-          .then((res) => {
-            if (process.env.UI_DEBUG) console.log('   fetch', String(url), res.status);
-            const sc = res.headers.get('set-cookie');
-            if (sc) cookie = sc.split(';')[0];
-            return res;
-          });
+        return globalThis.fetch(abs, Object.assign({}, opts, { headers })).then((res) => {
+          const sc = res.headers.get('set-cookie');
+          if (sc) cookie = sc.split(';')[0];
+          return res;
+        });
       };
       window.navigator.clipboard = { writeText: () => Promise.resolve() };
-      window.EventSource = class {
-        constructor(url) {
-          this.url = url;
-          this.readyState = 1;
-          setTimeout(() => this.onopen && this.onopen({}), 5);
-        }
-        addEventListener() {}
-        close() {
-          this.readyState = 2;
-        }
-      };
+      window.confirm = () => true;
+      window.prompt = (_m, def) => def || 'renamed';
       window.HTMLElement.prototype.scrollTo = function () {};
     }
   });
 
   const w = dom.window;
   const doc = w.document;
-  // app.js manually inject (jsdom resources se external script load nahi karta)
-  const scriptEl = doc.createElement('script');
-  scriptEl.textContent = await fsp.readFile(path.join(ROOT, 'public/assets/app.js'), 'utf8');
-  doc.body.appendChild(scriptEl);
-  // app.js boot() turant chalta hai; thoda time do
+  const script = doc.createElement('script');
+  script.textContent = await fsp.readFile(path.join(ROOT, 'public/assets/app.js'), 'utf8');
+  doc.body.appendChild(script);
   await sleep(700);
 
-  console.log('\n[1] Login screen');
-  check('login card dikha (session nahi tha)', !!doc.querySelector('.login-card'));
-  check('password field hai', !!doc.querySelector('#pw'));
-  doc.querySelector('#pw').value = 'testpass123';
-  doc.querySelector('#login-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
-  const loggedIn = await waitUntil(() => !!doc.querySelector('.topbar'), 6000);
-  check('login ke baad topbar aaya', loggedIn);
-  check('VM ka naam dashboard par hai', /ui-demo/.test(doc.body.textContent || ''));
+  console.log('\n[1] Login');
+  check('login card dikha', !!doc.querySelector('.auth-card'));
+  doc.querySelector('#pw').value = 'forge123456';
+  doc.querySelector('#auth-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+  const loggedIn = await waitFor(() => !!doc.querySelector('.app-shell'), 9000);
+  check('login ke baad studio khula', loggedIn);
+  check('sidebar hai', !!doc.querySelector('.sidebar'));
+  check('composer hai', !!doc.querySelector('#prompt'));
+  check('workspace panel hai', !!doc.querySelector('.aside'));
+  check('empty state suggestions hain', doc.querySelectorAll('.sugg').length >= 4);
 
-  console.log('\n[2] Dashboard');
-  check('"Naya VPS" button hai', !!Array.from(doc.querySelectorAll('button')).find((b) => /Naya VPS/.test(b.textContent)));
-  check('stats cards hain', doc.querySelectorAll('.stat').length >= 3);
-  check('VM card ka status green hai', !!doc.querySelector('.vm-card .badge.green'));
+  console.log('\n[2] Chat + streaming');
+  check('engine chip ready hai', /ready|model/i.test(doc.querySelector('#top-stats').textContent));
+  const ta = doc.querySelector('#prompt');
+  ta.value = 'Ek landing page banao';
+  doc.querySelector('#btn-send').click();
+  const gotCode = await waitFor(() => !!doc.querySelector('.code-block'), 15000);
+  check('stream ke baad code block aaya', gotCode);
+  check('code block par path badge hai', !!doc.querySelector('.code-head .path'));
+  check('apply button hai', !!doc.querySelector('[data-apply]'));
+  const finished = await waitFor(() => !doc.querySelector('#btn-stop') || doc.querySelector('#btn-stop').style.display === 'none', 15000);
+  check('stream khatam hua', finished);
+  check('user message dikha', doc.querySelectorAll('.msg.user').length >= 1);
+  const chatCount = (await httpReq('GET', '/api/chats')).json.chats.length;
+  check('chat save hua', chatCount >= 1, String(chatCount));
 
-  const newBtn = Array.from(doc.querySelectorAll('button')).find((b) => /Naya VPS/.test(b.textContent));
-  newBtn.click();
-  await sleep(600);
-  const modal = doc.querySelector('.modal-back');
-  check('create modal khula', !!modal);
-  check('modal me image select hai', !!(modal && modal.querySelector('select[name=imageId]')));
-  check('modal me password prefilled hai', !!(modal && modal.querySelector('input[name=password]').value.length >= 8));
-  if (modal) modal.querySelector('[data-close]').click();
-
-  console.log('\n[3] VM detail');
-  w.location.hash = `#/vm/${vm.id}`;
-  await sleep(800);
-  check('VM detail khula', !!doc.querySelector('#term-body'));
-  check('SSH command dikh raha hai', /ssh -p \d+/.test(doc.body.textContent || ''));
-  check('share link hai', !!doc.querySelector('#share-url') && doc.querySelector('#share-url').value.includes('/#/console/'));
-  check('settings form hai', !!doc.querySelector('#vm-settings'));
-  check('console terminal focusable hai', !!doc.querySelector('#term-body').getAttribute('tabindex'));
-
-  // terminal key input -> POST (should not throw)
-  const term = doc.querySelector('#term-body');
-  const ev = new w.KeyboardEvent('keydown', { key: 'l', bubbles: true, cancelable: true });
-  term.dispatchEvent(ev);
-  check('terminal keydown handle hua', ev.defaultPrevented);
-
-  console.log('\n[4] Images');
-  w.location.hash = '#/images';
-  await sleep(800);
-  check('images page khula', /OS Images/.test(doc.body.textContent || ''));
-  check('catalog cards dikhe', doc.querySelectorAll('[data-dl]').length >= 3);
-  check('upload input hai', !!doc.querySelector('#iso-file'));
-
-  console.log('\n[5] Settings');
-  w.location.hash = '#/settings';
-  await sleep(700);
-  check('settings page khula', !!doc.querySelector('#set-form'));
-  check('host info dikh rahi hai', /QEMU/.test(doc.body.textContent || ''));
-  check('password form hai', !!doc.querySelector('#pw-form'));
-
-  console.log('\n[6] Public console (share link)');
-  w.location.hash = `#/console/${vm.shareToken}`;
-  await sleep(700);
-  check('share console page khula', !!doc.querySelector('.term-body'));
-  check('share page par panel nav nahi hai', !doc.querySelector('.nav'));
-
-  console.log('\n[7] XSS safe rendering');
-  await httpReq('POST', '/api/vms', {
-    name: 'xss-test',
-    imageId,
-    cpu: 1,
-    memMB: 256,
-    diskGB: 2,
-    user: 'ubuntu',
-    password: 'secret12345'
-  });
-  const bad = await httpReq('POST', '/api/vms', { name: 'tmp', imageId, cpu: 1, memMB: 256, diskGB: 2 });
-  await httpReq('PATCH', `/api/vms/${bad.json.vm.id}`, { name: '<img src=x onerror=alert(1)>' });
-  w.location.hash = '#/';
+  console.log('\n[3] Apply file → workspace');
+  const applyBtns = Array.from(doc.querySelectorAll('[data-apply]'));
+  check('3 apply buttons hain (multi-file)', applyBtns.length >= 3, String(applyBtns.length));
+  for (const b of applyBtns) {
+    b.click();
+    await sleep(250);
+  }
+  const treeHasFile = await waitFor(async () => {
+    const r = await httpReq('GET', '/api/files');
+    return r.json.tree.some((e) => e.path === 'index.html');
+  }, 8000);
+  check('file workspace me aa gayi', treeHasFile);
+  // apply ke baad app preview tab kholta hai — settle hone do, phir Files tab
   await sleep(900);
-  check('naam HTML inject nahi hua', !doc.querySelector('img[onerror]'));
+  const filesTab = Array.from(doc.querySelectorAll('.aside-tabs button')).find((b) => b.dataset.tab === 'files');
+  if (filesTab) filesTab.click();
+  await waitFor(() => doc.querySelectorAll('.tree-row').length > 0, 6000);
+  check('tree me rows dikh rahe hain', doc.querySelectorAll('.tree-row').length >= 3, String(doc.querySelectorAll('.tree-row').length));
+
+  const fileRow = Array.from(doc.querySelectorAll('.tree-row')).find((r) => /index\.html/.test(r.textContent));
+  check('index.html tree me hai', !!fileRow);
+  if (fileRow) {
+    fileRow.click();
+    await waitFor(() => !!doc.querySelector('#file-content'), 6000);
+    check('editor khula', !!doc.querySelector('#file-content'));
+    check('editor me content hai', (doc.querySelector('#file-content') || {}).value?.includes('Forge se bana') || false);
+    const saveBtn = doc.querySelector('#file-save');
+    check('save button hai', !!saveBtn);
+  }
+
+  console.log('\n[4] Preview');
+  const pvTab = Array.from(doc.querySelectorAll('.aside-tabs button')).find((b) => b.dataset.tab === 'preview');
+  if (pvTab) pvTab.click();
+  const frame = await waitFor(() => !!doc.querySelector('#pv-frame'), 8000);
+  check('preview iframe aaya', frame);
+  check('iframe sandbox hai', (doc.querySelector('#pv-frame') || {}).getAttribute?.('sandbox')?.includes('allow-scripts') || false);
+  const pvSrc = (doc.querySelector('#pv-frame') || {}).srcdoc || '';
+  check('preview me html render hua', /Forge se bana page/.test(pvSrc), pvSrc.slice(0, 80));
+
+  console.log('\n[5] Modals');
+  doc.querySelector('#btn-models').click();
+  await waitFor(() => !!doc.querySelector('.model-card'), 6000);
+  check('models modal khula', !!doc.querySelector('.model-card'));
+  check('5 model cards hain', doc.querySelectorAll('.model-card').length >= 5, String(doc.querySelectorAll('.model-card').length));
+  check('download buttons hain', doc.querySelectorAll('[data-dl]').length >= 4);
+  const closeBtn = doc.querySelector('#m-close');
+  if (closeBtn) closeBtn.click();
+  await sleep(200);
+  check('models modal band hua', !doc.querySelector('.model-card'));
+
+  doc.querySelector('#btn-settings').click();
+  await sleep(300);
+  check('settings modal khula', !!doc.querySelector('#s-temp'));
+  check('temperature slider hai', !!doc.querySelector('#s-temp'));
+  const sClose = doc.querySelector('#s-close');
+  if (sClose) sClose.click();
+
+  console.log('\n[6] Chats + presets');
+  check('preset selector bhara hai', doc.querySelectorAll('#preset option').length >= 5);
+  doc.querySelector('#btn-newchat').click();
+  await sleep(300);
+  check('naya chat khula', !!doc.querySelector('.empty-chat'));
+  check('chat list me item hai', doc.querySelectorAll('.chat-item').length >= 1);
 
   dom.window.close();
   finish();

@@ -1,19 +1,29 @@
 'use strict';
 /**
- * Panel state — data/panel.json
- * Saare write ek queue se hote hain, isliye parallel requests se file corrupt nahi hoti.
+ * State: data/panel.json (settings + chat index + installed models)
+ *        data/chats/<id>.json (messages)
  */
-const fs = require('fs');
-const { PANEL_JSON, DATA_DIR } = require('./config');
-const { readJson, writeJsonAtomic, ensureDir } = require('./util');
+const fsp = require('fs').promises;
+const path = require('path');
+const cfg = require('./config');
+const { readJson, writeJsonAtomic, ensureDir, uid } = require('./util');
 
 const EMPTY = () => ({
   version: 1,
   createdAt: Date.now(),
   auth: null,
-  vms: [],
-  images: [],
-  settings: {}
+  settings: {
+    modelId: null,
+    temperature: 0.2,
+    maxTokens: 1600,
+    ctxSize: 4096,
+    preset: 'engineer',
+    useProjectContext: true,
+    autoApply: false,
+    theme: 'dark'
+  },
+  chats: [],
+  models: []
 });
 
 let state = null;
@@ -21,52 +31,88 @@ let queue = Promise.resolve();
 let dirty = false;
 
 async function init() {
-  await ensureDir(DATA_DIR);
-  state = Object.assign(EMPTY(), await readJson(PANEL_JSON, {}));
-  if (!Array.isArray(state.vms)) state.vms = [];
-  if (!Array.isArray(state.images)) state.images = [];
-  if (!state.settings) state.settings = {};
+  await ensureDir(cfg.DATA_DIR);
+  await ensureDir(cfg.CHATS_DIR);
+  state = Object.assign(EMPTY(), await readJson(cfg.PANEL_JSON, {}));
+  state.settings = Object.assign(EMPTY().settings, state.settings || {});
+  if (!Array.isArray(state.chats)) state.chats = [];
+  if (!Array.isArray(state.models)) state.models = [];
   return state;
 }
 
-function get() {
-  if (!state) throw new Error('store not initialised');
+const get = () => {
+  if (!state) throw new Error('store not ready');
   return state;
-}
+};
 
-/** Serialized save — ek ke baad ek. */
 function save() {
+  dirty = true;
   queue = queue.then(async () => {
     if (!dirty) return;
     dirty = false;
-    await writeJsonAtomic(PANEL_JSON, state);
+    await writeJsonAtomic(cfg.PANEL_JSON, state);
   });
-  return queue.catch((e) => {
-    console.error('[store] save failed:', e.message);
-  });
+  return queue.catch((e) => console.error('[store]', e.message));
 }
 
-/** Mutate + save shortcut. */
 async function update(fn) {
   const r = fn(get());
-  dirty = true;
   await save();
   return r;
 }
 
-/** File me bhi turant likhna ho to (shutdown ke waqt) */
-async function flush() {
-  dirty = true;
-  await save();
+// ------------------------------------------------------------------ chats
+const chatPath = (id) => path.join(cfg.CHATS_DIR, `${id}.json`);
+
+async function createChat({ title = 'Naya chat', preset } = {}) {
+  const chat = {
+    id: `c-${uid(10)}`,
+    title,
+    preset: preset || get().settings.preset,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    messages: []
+  };
+  await writeJsonAtomic(chatPath(chat.id), chat);
+  await update((s) => {
+    s.chats.unshift({ id: chat.id, title: chat.title, createdAt: chat.createdAt, updatedAt: chat.updatedAt, count: 0 });
+  });
+  return chat;
 }
 
-function lastWriteOk() {
-  try {
-    fs.accessSync(PANEL_JSON, fs.constants.W_OK);
-    return true;
-  } catch {
-    return false;
-  }
+async function getChat(id) {
+  const chat = await readJson(chatPath(id), null);
+  if (!chat) return null;
+  return chat;
 }
 
-module.exports = { init, get, save, update, flush, lastWriteOk };
+async function saveChat(chat) {
+  chat.updatedAt = Date.now();
+  await writeJsonAtomic(chatPath(chat.id), chat);
+  await update((s) => {
+    const item = s.chats.find((c) => c.id === chat.id);
+    if (item) {
+      item.title = chat.title;
+      item.updatedAt = chat.updatedAt;
+      item.count = chat.messages.length;
+    } else {
+      s.chats.unshift({ id: chat.id, title: chat.title, createdAt: chat.createdAt, updatedAt: chat.updatedAt, count: chat.messages.length });
+    }
+  });
+  return chat;
+}
+
+async function deleteChat(id) {
+  await fsp.rm(chatPath(id), { force: true }).catch(() => {});
+  await update((s) => {
+    s.chats = s.chats.filter((c) => c.id !== id);
+  });
+}
+
+function listChats() {
+  return get()
+    .chats.slice()
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+module.exports = { init, get, save, update, createChat, getChat, saveChat, deleteChat, listChats, chatPath };

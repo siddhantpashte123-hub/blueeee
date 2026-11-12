@@ -1,57 +1,69 @@
-# VPSDeck 🖥️
+# Forge ⚡
 
-**Apne ek VPS ke andar, jitne chahein VPS.** Docker ke bina, Kubernetes ke bina — sirf QEMU + ek Node.js panel.
+**Aapke apne VPS par chalta AI code studio.** Koi API key nahi, koi cloud nahi, koi bill nahi — model aapke server par, chat aapke browser me, code aapke folder me.
 
-VPSDeck ek chhota par poora control panel hai jo aapke VPS par **real virtual machines (KVM/QEMU)** banata hai: har VM ka apna disk, apna RAM/CPU, apna Linux user, apna SSH, aur browser me **live console**. QEMU VMs VPS ke andar normal processes ki tarah chalte hain, isliye na Docker chahiye, na special hosting.
+Port **4040** par chalta hai. `llama.cpp` engine + aapka chuna hua chhota model (1–5 GB). Docker, GPU ya systemd ki zaroorat nahi.
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  Aapka VPS (Ubuntu 22.04)                                │
-│                                                          │
-│   VPSDeck panel  :8080  ← browser me dashboard           │
-│      ├── VM 1  (Ubuntu 24.04, 1 vCPU, 1GB)  disk.qcow2   │
-│      ├── VM 2  (Alpine,      1 vCPU, 512MB) disk.qcow2   │
-│      └── VM 3  (Ubuntu 22.04, 2 vCPU, 2GB)  disk.qcow2   │
-└──────────────────────────────────────────────────────────┘
+┌──────────── browser :4040 ────────────┐
+│  chats   │   chat + streaming   │ files│
+└──────────┴──────────┬───────────┴──────┘
+                      │  SSE
+              ┌───────▼────────┐
+              │  Forge (Node)  │  ← ye panel
+              └───────┬────────┘
+                      │ 127.0.0.1:4055
+              ┌───────▼──────────────┐
+              │ llama-server + GGUF  │  ← aapka model (CPU par)
+              └──────────────────────┘
 ```
 
 ---
 
-## Pehle sach: "unlimited VPS" ka matlab
+## Pehle sach (important)
 
-Aap "unlimited VPS" bana sakte hain **jitna aapka VPS allow kare** — unlimited ka koi jaadu nahi hai. Har VM ko CPU, RAM aur disk chahiye:
+Ye **ChatGPT jaisa** nahi hai. Ye ek **chhota local model** hai jo CPU par chalta hai:
 
-| Aapke VPS ki RAM | Kitne VMs (1GB wale) | Note |
-|---|---|---|
-| 2 GB | 1 | Panel khud bhi ~120 MB leta hai |
-| 4 GB | 2–3 | 3 chalenge par swap pe aa jayega |
-| 8 GB | 5–6 | Comfortable |
-| 16 GB | 10–12 | Achha |
-| 32 GB | 20+ | I/O bound ho jayega |
+| Aapke VPS | Model | Speed | Kya kar sakta hai |
+|---|---|---|---|
+| 2 vCPU / 4 GB | Qwen2.5-Coder **1.5B** | ~5–12 tok/s | Chhote files, functions, HTML/CSS, scripts, bug fix |
+| 4 vCPU / 8 GB | Qwen2.5-Coder **3B** | ~4–9 tok/s | Poora chhota project (3–5 files), API endpoints |
+| 8 vCPU / 16 GB | Qwen2.5-Coder **7B** | ~2–5 tok/s | Behtar reasoning, bade files, refactor |
 
-Aur ek **bahut zaroori baat** — speed:
+Matlab:
+- ✅ Single-file web apps, landing pages, scripts, CRUD API, regex, SQL, config, tests — **achha karta hai**
+- ✅ Aapke project ke files padh ke usi style me code likh sakta hai (context)
+- ⚠️ Bade multi-file production apps, ya complex architecture — adhoora/ghalat ho sakta hai, review karna zaroori
+- ❌ Bahut lambi files (1000+ lines) ek baar me nahi likhta — chhote chunks me kaam karwao
 
-| | Kab milta hai | Speed |
-|---|---|---|
-| **KVM** (hardware) | VPS provider ne *nested virtualization* ON kiya ho (`/dev/kvm` dikhe) | 100% — normal VPS jaisa |
-| **TCG** (software) | `/dev/kvm` nahi hai (zyadatar sasta VPS, aur wo VPS jo khud container/LXC me hai) | ~10–20% — boot 3–10 min, kaam chal jata hai par slow |
-
-Panel dono mode me kaam karta hai aur dashboard par saaf dikhata hai aap kaunse mode me ho. **TCG me Alpine Linux sabse best chalta hai** (60 MB image), Ubuntu heavy lagta hai.
-
-> Agar `/dev/kvm` nahi hai aur aapko bahut VMs chahiye — sasta raasta: usi panel me **Alpine + 512MB** wale VMs banao, ya provider se nested virtualization on karwao.
+Ek 1.5B model 10 GB model jaisa smart nahi hota — par **free, private aur unlimited** hai. Isi liye Forge me har code block par **Apply** button hai: AI likhta hai, aap dekh ke apply karte ho. Blind copy nahi.
 
 ---
 
-## Requirements
+## Features
 
-- Ubuntu 20.04/22.04/24.04 ya Debian 11/12 (x86_64)
-- Node.js 18+ (installer khud install kar deta hai)
-- `qemu-system-x86` + `qemu-utils` (installer `apt` se laga deta hai)
-- Root access
-- Host me 64-bit virtualization feasible ho (KVM optional)
-- Internet (image download ke liye) — panel ko internet ki zaroorat nahi
+**Chat**
+- Token-by-token streaming (SSE), Stop button, tok/s live
+- 5 system presets: ⚡ Senior Engineer, 🏗️ Architect, 🐞 Debugger, 🔎 Reviewer, 🎨 UI Designer
+- Chat history server par save (data/chats), rename / delete
+- Project files context me attach kar sakte ho (📎) — model aapka code dekh ke likhta hai
 
-Docker / systemd **optional** — systemd na ho to panel standalone mode me chalta hai.
+**Code**
+- AI file fences `path=...` ke saath deta hai → **Apply** button se seedha workspace me
+- Multi-file apply, auto-apply (Settings me on karo to sab automatic)
+- Built-in editor (save, delete, tab-indent), file tree, ZIP download
+- **Live preview**: HTML/CSS/JS projects ka render, iframe sandbox me (safe)
+
+**Engine**
+- Model manager: download (progress ke saath), load/unload, delete, custom GGUF URL
+- RAM dekh ke model recommend karta hai
+- Engine logs UI me (agar model load fail ho to wajah dikhti hai)
+- External engine support: pehle se `llama.cpp`/`Ollama` chal raha ho to `LLM_URL` se jod do
+
+**Panel**
+- Password login (scrypt + session cookie), login rate-limit, CSRF origin check
+- Path traversal safe file API, 512 KB per file limit
+- Zero npm dependencies, ek Node process
 
 ---
 
@@ -62,101 +74,74 @@ curl -fsSL https://raw.githubusercontent.com/siddhantpashte123-hub/blueeee/main/
 ```
 
 Kya karta hai:
-1. Node 18+ check/install
-2. `qemu-system-x86 qemu-utils` install
-3. `/dev/kvm` check aur accel mode batata hai
-4. System user `vpsdeck` banata hai (kvm group me daalta hai)
-5. Code `/opt/vpsdeck` me copy karta hai — **`data/` safe rehta hai** (upgrade par VMs nahi udte)
-6. systemd service **ya** standalone `vpsdeck` command + `/etc/cron.d/vpsdeck` autostart
-7. Panel port auto-pick karta hai (busy ho to agla free)
-8. Health check + summary print karta hai
+1. Node 18+ (nahi hai to install)
+2. `forge` system user
+3. **llama.cpp** ka official prebuilt binary (GitHub release, ~25 MB) — compile ki zaroorat nahi
+4. Aapki RAM ke hisaab se model download (1.5B default ~1 GB)
+5. Panel `/opt/forge` me, port **4040** (busy ho to agla free)
+6. systemd service **ya** standalone `forge` command + reboot autostart
+7. Health check + summary
 
-Options (env vars):
+Options:
 
 ```bash
-curl -fsSL .../install.sh | sudo PORT=8080 APP_DIR=/opt/vpsdeck SERVICE_USER=vpsdeck bash
-# systemd-less host par force:
+# model chuno
+curl -fsSL .../install.sh | sudo MODEL=qwen2.5-coder-3b bash
+# model/engine skip karo (panel se baad me)
+... | sudo SKIP_MODEL=1 bash
+# systemd-less VPS
 sudo NO_SYSTEMD=1 bash scripts/install.sh
-# QEMU pehle se installed hai to apt skip:
-sudo SKIP_QEMU=1 bash scripts/install.sh
-# specific version:
-sudo VPSDECK_REF=<commit-sha> bash scripts/install.sh
+# specific version
+sudo FORGE_REF=<commit-sha> bash scripts/install.sh
 ```
 
-Manual install:
+Manual:
 
 ```bash
-sudo apt update && sudo apt install -y qemu-system-x86 qemu-utils
-git clone <repo> vpsdeck && cd vpsdeck
-sudo PORT=8080 node server.js      # ya: PORT=8080 npm start
+git clone <repo> forge && cd forge
+PORT=4040 node server.js       # engine models page se manage karo
+# ya apna engine:
+LLM_URL=http://127.0.0.1:8080 PORT=4040 node server.js
 ```
 
 ---
 
 ## Pehle 5 minute
 
-1. **Panel kholein** — `http://<vps-ip>:8080` (internet par direct nahi hai to neeche tunnel dekhein)
-2. **Password set karein** — pehli baar panel khud setup screen dikhata hai (kam se kam 6 characters)
-3. **OS Images** page → "Ubuntu 24.04" ya "Alpine" par **Download** (Alpine 60 MB, Ubuntu ~300 MB)
-4. **+ Naya VPS** → naam, CPU, RAM, disk, user, password → Create
-5. VM card par **Console** → browser me boot log aayega (`login:` prompt)
-6. Wahi user/password se console me login karein ya **SSH** se judein
-
-VM 30 second me ban jata hai. Boot time: KVM par ~15–30s, TCG par 3–10 min (Alpine fastest).
+1. `http://<vps-ip>:4040` kholein (direct nahi khul raha to neeche tunnel dekhein)
+2. **Password set karein** (pehli baar)
+3. Top-right **Models** → jo model install hai us par **Load** (10–60 s)
+4. Chat me likhein: *"ek premium login page banao glassmorphism ke saath"*
+5. Code block par **Apply** → file workspace me aa jayegi → **Preview** tab me result dekhein
 
 ---
 
-## VM ke andar ghusne ke 3 raaste
+## Code kaise apply hota hai
 
-### 1. Browser console (sabse aasan)
+Model ko system prompt me sikhaya jaata hai ki file is format me de:
 
-VM page par serial console live chalta hai. Click karke type karein — Enter, arrows, Ctrl+C sab kaam karte hain. Boot problems yahin dikhti hain (kernel panic, cloud-init error, login prompt).
-
-### 2. SSH (VPS ke andar se)
-
-Har VM ko ek host port milta hai (22000 se shuru), jo sirf `127.0.0.1` par khula hai:
-
-```bash
-# VPS par ssh karne ke baad:
-ssh -p 22001 ubuntu@127.0.0.1
+````
+```html path=index.html
+<!doctype html> … poora code …
 ```
+````
 
-Port aur password VM page ke "Access" card me dikhte hain.
+Forge isse pakadta hai:
+- har code block ke header me **path** badge + **Apply** / **Copy**
+- `Apply` → `POST /api/files/apply` → file `data/workspace/` me likhi jaati hai
+- `.html` file apply hui to **Preview** khud khul jaata hai
+- Settings → **Auto-apply** on karne par sab files khud likh jaati hain (fast loop, par dhyan se)
 
-### 3. Laptop se SSH (tunnel ke saath)
-
-Aapka VPS NAT ke peeche hai to pehle ek local-forward tunnel banayein:
-
-```bash
-# laptop par — VPS ka SSH 22 khula hona chahiye
-ssh -L 22001:127.0.0.1:22001 root@<vps-ip>
-# phir dusre terminal me:
-ssh -p 22001 ubuntu@127.0.0.1
-```
-
-### Doston ko dena hai?
-
-Har VM ke "Share" card me ek **console link** hota hai:
-
-```
-https://<panel-url>/#/console/<random-token>
-```
-
-Ye link sirf wahi VM ka terminal kholta hai — panel ka control, delete, ya doosre VMs ka access nahi milta. Token VM page se kabhi bhi naya bana sakte hain (reinstall/delete karne par purana link mar jata hai).
-
-> Share link ke liye panel internet se reachable hona chahiye (tunnel/domain). Neeche dekhein.
+Workspace hi aapka project hai — `data/workspace/`. Chaho to seedha wahan apna code daal do, phir AI usi par kaam karega (📎 attach / context).
 
 ---
 
-## Panel internet par kaise laayein (NAT ke peeche ho to)
+## Doston ko dena / internet par lana
 
-Agar `http://<vps-ip>:8080` nahi khul raha (private IP / NAT), do options:
-
-**Pinggy (free, test ke liye):**
+**Pinggy (free, testing):**
 
 ```bash
-ssh -p 443 -R0:localhost:8080 a.pinggy.io     # URL terminal me milega
-ssh -p 443 -R0:localhost:8080 qr@a.pinggy.io  # QR code ke saath
+ssh -p 443 -R0:localhost:4040 a.pinggy.io
 ```
 
 **Cloudflare Tunnel (permanent):**
@@ -164,185 +149,159 @@ ssh -p 443 -R0:localhost:8080 qr@a.pinggy.io  # QR code ke saath
 ```bash
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
 chmod +x /usr/local/bin/cloudflared
-cloudflared tunnel --url http://localhost:8080
+cloudflared tunnel --url http://localhost:4040
 ```
 
-Dono me URL public hota hai — **strong password rakhein**, aur kaam khatam hone par tunnel band kar dein. Permanent solution: domain + Nginx/Caddy reverse proxy (HTTPS) — `proxy_buffering off;` lagayein taaki console stream na ruke:
+Domain + HTTPS ke liye Nginx/Caddy. Streaming ke liye `proxy_buffering off;` zaroori hai:
 
 ```nginx
 location / {
-    proxy_pass http://127.0.0.1:8080;
+    proxy_pass http://127.0.0.1:4040;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
-    proxy_buffering off;
+    proxy_buffering off;      # warna tokens ruk-ruk ke aayenge
     proxy_read_timeout 3600s;
 }
 ```
 
----
-
-## VM management
-
-| Kaam | Kaise |
-|---|---|
-| **Start / Stop / Restart** | VM card ya VM page ke buttons |
-| **Console** | VM page (live serial), share link se bhi |
-| **CPU / RAM badalna** | Settings → VM stop karke save karein |
-| **Disk badhana** | Settings → Resize (sirf badha sakte hain, VM band ho) |
-| **Clone** | poori VM ki copy (naya password, naya port) |
-| **Reinstall** | disk naye siro se (cloud-init dobara chalta hai — naya password/key apply) |
-| **Snapshots** | Create / Restore / Delete (chal rahi VM par bhi) |
-| **Autostart** | host reboot par VM khud chalu |
-| **Delete** | disk + config hamesha ke liye jaata hai |
-
-Sab kuch `data/` me rehta hai:
-
-```
-/opt/vpsdeck/data/
-├── panel.json          # config (VM list, password hash, settings)
-├── port                # panel port
-├── panel.pid, panel.log
-├── images/             # base images (Ubuntu/Debian/Alpine) + uploaded ISOs
-└── vms/<vm-id>/
-    ├── disk.qcow2      # VM ka disk (base image ka overlay — patla file)
-    ├── seed.iso        # cloud-init: user, password, SSH keys
-    ├── qemu.pid        # qemu process id
-    ├── qmp.sock        # control socket (QEMU)
-    └── serial.sock     # console socket
-```
-
-**Disk space tip:** disk `copy-on-write` hai — 20 GB ka VM banane par shuru me sirf kuch MB leta hai, jitna likhenge utna badhega.
-
----
-
-## Errors jo aapko mil sakte hain (aur unka matlab)
-
-| Message | Matlab / fix |
-|---|---|
-| `QEMU installed nahi hai` | `sudo apt install -y qemu-system-x86 qemu-utils`, phir `vpsdeck restart` |
-| `/dev/kvm nahi mila` | VMs chalenge, par TCG (slow). Provider se nested virtualization on karwayein |
-| `permission denied /dev/kvm` | `sudo usermod -aG kvm vpsdeck && vpsdeck restart` |
-| `QEMU start nahi hua` | RAM kam hai ya KVM permission; `vpsdeck logs` dekhein, VM ki RAM kam karein |
-| Console par kuch nahi | VM boot ho raha hai (TCG me 5 min tak), ya image me cloud-init/serial console support nahi |
-| SSH connect nahi ho raha | VM ka boot pura hone do (login prompt dekho), port sahi hai? `ss -ltn \| grep 22` |
-| `Free SSH port nahi mila` | 22000–22999 poore ho gaye — kuch VMs delete karein ya `SSH_PORT_BASE` badlein |
-| Panel port busy | `vpsdeck port 9090` (ya `PORT=9090` se reinstall) |
-| Image download fail | Server ka internet check karein; ya ISO manually upload karein |
-
-Logs:
-
-```bash
-vpsdeck logs                    # standalone mode
-journalctl -u vpsdeck -n 100    # systemd mode
-```
+⚠️ Public URL = duniya bhi khol sakti hai. Strong password rakho, aur model par koi limit nahi hai — koi bhi token generate kar sakta hai.
 
 ---
 
 ## Commands
 
 ```bash
-vpsdeck start      # panel chalu
-vpsdeck stop       # panel band (VMs chalte rahenge!)
-vpsdeck restart
-vpsdeck status     # pid, port, health
-vpsdeck logs       # live log
-vpsdeck port 9090  # panel ka port badlo
+forge start      # panel + engine
+forge stop       # dono band
+forge restart
+forge status     # pid, port, health
+forge logs       # live log
+forge port 4041  # port badlo
 ```
 
-systemd mode: `systemctl status|restart vpsdeck`
+systemd mode: `systemctl status|restart forge`
 
-Panel band karne se VMs nahi rukte (wo alag processes hain). VMs rukenge tabhi jab aap stop karein ya host reboot ho (autostart wale wapas chalu ho jate hain).
+Panel band karne se engine bhi band ho jata hai (RAM free).
 
 ---
 
-## Security
+## Data layout
 
-- Password `scrypt` (N=16384) se hash hota hai, `data/panel.json` me salt ke saath
-- Session: HttpOnly cookie (`bd_vps_session`), 7 din, HTTPS par `Secure`
-- Login rate-limit: 10 galat try / 5 minute per IP
-- Har POST/PATCH/DELETE par origin check (CSRF)
-- VM console apne unix socket par chalta hai — network par exposed nahi
-- SSH ports sirf `127.0.0.1` par bind hote hain (public nahi)
-- Panel root ke bajaye `vpsdeck` user se chalta hai; VMs bhi usi user ke
+```
+/opt/forge/
+├── server.js, src/, public/       # code
+└── data/
+    ├── panel.json                 # settings, password hash, model list
+    ├── bin/llama.cpp/             # engine binary + libs
+    ├── bin/llama-server           # wrapper (LD_LIBRARY_PATH)
+    ├── models/*.gguf              # model files
+    ├── chats/<id>.json            # conversations
+    └── workspace/                 # aapka project (AI yahan likhta hai)
+```
 
-Kya **nahi** hai: 2FA, multi-user roles, audit log, per-VM hard quotas. Ek admin panel hai — dost ko dena ho to console share link use karein, ya har VM ka SSH (tunnel ke saath).
+Backup = `data/` folder copy. Reinstall karne par `data/` nahi udta.
 
 ---
 
-## API (chhota reference)
+## Troubleshooting
 
-Sab `/api/*` routes cookie ya `Authorization: Bearer <token>` maangte hain (`/api/health` chhod ke).
+| Problem | Fix |
+|---|---|
+| `llama-server nahi mila` | `sudo bash scripts/install.sh` dobara (engine download step), ya `LLM_BIN=/path/to/llama-server` |
+| Model load hote hi band ho jata hai | Model RAM me fit nahi. Chhota model (1.5B/0.5B) lo, ya VM ki RAM badhao |
+| Load 180s me nahi hua | 7B CPU par slow hai — 1.5B try karo, ya `CTX_SIZE=2048` |
+| Bahut slow (1-2 tok/s) | CPU weak hai. Alpine/1.5B model, `THREADS=<cores>` check karo |
+| `Illegal instruction (core dumped)` | Binary AVX2 maang raha hai. Purane CPU par source se build karo, ya `SKIP_LLAMA=1` + apna binary |
+| Chat me "engine ready nahi" | Models page → Load. Error logs wahan dikhte hain |
+| Preview khali | Workspace me `index.html` nahi hai — AI se HTML banwao |
+| Tokens ruk-ruk ke aate hain | Reverse proxy me `proxy_buffering off;` lagao |
+| Download fail (HuggingFace) | Server ka internet / DNS check karo, ya `data/models/` me `.gguf` manually daalo + Re-scan |
+| Port busy | `forge port 4041` |
+
+Logs: `forge logs` ya UI → Models → Logs.
+
+---
+
+## API (chhota)
 
 ```
-POST   /api/auth/setup            { password }             pehli baar
-POST   /api/auth/login            { password }             cookie set
-GET    /api/system                                         host + qemu info
-GET    /api/vms                                            list + live status
-POST   /api/vms                   { name, imageId, cpu, memMB, diskGB, user, password, sshKeys[], start }
-POST   /api/vms/:id/start|stop|restart|reinstall|clone|resize
-PATCH  /api/vms/:id               { name, cpu, memMB, password, autostart, notes }
-DELETE /api/vms/:id
-GET    /api/vms/:id/ssh                                    ssh command + password
-GET    /api/vms/:id/snapshots     POST same (create), /:tag/restore, DELETE /:tag
-GET    /api/vms/:id/console       SSE stream (boot log / serial)
-POST   /api/vms/:id/console       { data }                 keyboard input
-GET    /api/public/console/:token                          friend share link (no auth)
-GET    /api/images                                         catalog + installed + progress
-POST   /api/images/download       { id | url, name }
-POST   /api/images/upload?name=x.iso                       raw body upload
-DELETE /api/images/:id
-POST   /api/settings              { sshHost, panelName }
-POST   /api/panel/password        { current, next }
+GET    /api/health                     (public)
+POST   /api/auth/setup | login | logout
+GET    /api/system                     host + engine + settings
+GET    /api/models                     catalog + installed + progress
+POST   /api/models/download {id|url}
+POST   /api/models/load {id} | unload
+GET    /api/chats | POST | GET/:id | PATCH/:id | DELETE/:id
+POST   /api/chat                       SSE: start → token* → done
+POST   /api/chat/stop
+GET    /api/files                      tree + stats
+GET    /api/file?path=   PUT  /api/file   DELETE /api/file?path=
+POST   /api/files/apply {files:[…]} ya {text:"…"}
+GET    /api/files/zip
+GET    /api/preview?path=
+POST   /api/settings
+```
+
+`POST /api/chat` ka stream:
+
+```
+data: {"type":"start","chatId":"c-…"}
+data: {"type":"token","t":"Maine"}
+…
+data: {"type":"done","files":["index.html"],"tokensPerSec":6.4,"aborted":false}
 ```
 
 ---
 
-## Architecture (ek nazar me)
+## Architecture
 
 ```
-server.js            HTTP server, static files, banner, graceful shutdown
-src/routes.js        poora REST API + SSE console proxy
-src/vms.js           VM lifecycle (create/clone/reinstall/snapshot/resize)
-src/qemu.js          QEMU args, start/stop, KVM vs TCG detect
-src/qmp.js           QEMU Machine Protocol client (unix socket, JSON)
-src/serial.js        serial console bridge (socket → SSE, input → socket)
-src/iso.js           apna ISO9660+Joliet writer (cloud-init seed ke liye)
-src/cloudinit.js     user-data / meta-data generation
-src/images.js        base image catalog, download, upload
-src/store.js         data/panel.json (serialized atomic writes)
-src/auth.js          scrypt, sessions, rate limit
-src/util.js          helpers (exec, ports, /proc info)
-public/              SPA (vanilla JS + CSS, koi framework nahi)
-scripts/             install / service / uninstall
-tests/               iso-test, lifecycle-test (mock qemu), ui-smoke
+server.js          HTTP + static + banner + shutdown (engine bhi band)
+src/llm.js         llama-server supervisor + OpenAI-compatible streaming client
+src/models.js      GGUF catalog, download (progress), RAM-based recommend
+src/project.js     workspace: tree/read/write/apply/zip/preview (css+js inline)
+src/prompts.js     system prompts + FILE PROTOCOL (path= fences)
+src/routes.js      poora API + SSE chat proxy + auto-apply
+src/store.js       panel.json + chats/<id>.json (atomic writes)
+src/auth.js        scrypt, sessions, rate limit
+src/util.js        exec, safe paths, CRC32 zip writer
+public/            SPA (vanilla JS + CSS)
+scripts/           install / service / uninstall
+tests/             mock-llm, api-test, engine-test, ui-smoke
 ```
-
-Koi npm dependency nahi (production me). Node ke built-ins hi kaafi hain.
 
 ---
 
-## Develop / test
+## Develop
 
 ```bash
-node server.js                       # data/ repo ke andar
-node tests/iso-test.js               # ISO + cloud-init checks
-node tests/lifecycle-test.js         # poora VM lifecycle (mock QEMU — real QEMU ki zaroorat nahi)
-npm i --no-save jsdom && node tests/ui-smoke.js   # UI smoke test
+node server.js
+node tests/api-test.js        # 45 checks (mock engine)
+node tests/engine-test.js     # 17 checks (panel khud engine spawn karta hai)
+npm i --no-save jsdom && node tests/ui-smoke.js   # 33 checks (UI)
 ```
 
-`tests/mock-qemu.js` ek fake QEMU hai jo QMP + serial sockets khol deta hai — isliye sandbox/CI me bhi poora panel test ho jata hai.
+`tests/mock-llm.js` ek OpenAI-compatible fake engine hai — real model ke bina poora panel test ho jata hai.
+
+---
+
+## Honest limits
+
+- **Quality**: 1.5B/3B models chhote hain. Inhe "junior developer" samjho — speed se likhte hain, galti bhi karte hain. Code review karo.
+- **Speed**: GPU nahi hai to CPU par 2–12 tok/s. 300-line file me 2-4 minute lag sakte hain.
+- **Context**: 4096 tokens (~3000 words). Bada project = chhote hisson me kaam karwao.
+- **Multi-user**: ek admin panel hai, roles nahi. Dost ko dena ho to alag instance (`PORT=4041 APP_DIR=/opt/forge2`) chalao.
+- **Sandbox**: AI ka code **aapke folder me** likhta hai, chalata nahi. Kuch bhi run karne se pehle padho.
 
 ---
 
 ## Uninstall
 
 ```bash
-sudo bash scripts/uninstall.sh          # panel hatao, data/VMs rakho
-sudo bash scripts/uninstall.sh --purge  # sab kuch delete (VM disks bhi)
+sudo bash scripts/uninstall.sh          # panel hatao, data rakho
+sudo bash scripts/uninstall.sh --purge  # sab (models + chats + workspace)
 ```
-
----
 
 ## License
 
-MIT — `LICENSE` dekhein.
+MIT
