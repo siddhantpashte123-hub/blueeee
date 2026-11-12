@@ -101,6 +101,11 @@ sudo APP_DIR=/srv/botdeck PORT=8080 SERVICE_USER=bots bash scripts/install.sh
 sudo NO_SYSTEMD=1 bash scripts/install.sh   # force the no-systemd standalone mode
 ```
 
+If the requested port is already taken by something else, the installer picks
+the next free port automatically and prints it at the end (change it later with
+`botdeck port <n>` on no-systemd hosts, or by editing `Environment=PORT=` in the
+systemd unit).
+
 Then open `http://YOUR_SERVER_IP:3000` and create the admin password on first visit.
 
 ### Servers without systemd (containers, OpenVZ/LXC, minimal images)
@@ -110,11 +115,12 @@ The installer detects that automatically and installs a small control script
 instead of the unit — nothing manual needed:
 
 ```bash
-botdeck status      # running? which pid/port
+botdeck status        # running? which pid/port
 botdeck start
 botdeck restart
 botdeck stop
-botdeck logs        # tail -f /opt/botdeck/data/panel.log
+botdeck logs          # tail -f /opt/botdeck/data/panel.log
+botdeck port 8090     # change port and restart automatically
 ```
 
 In this mode:
@@ -417,7 +423,10 @@ sudo bash scripts/uninstall.sh --purge    # also deletes /opt/botdeck
 ## Troubleshooting
 
 **Port already in use**  
-`PORT=3001 node server.js`, or change `Environment=PORT=` in the systemd unit.
+The installer now detects a busy port and switches to the next free one itself
+(it prints the chosen port at the end). Without systemd: `botdeck port 8090`.
+With systemd: change `Environment=PORT=` in `/etc/systemd/system/botdeck.service`
+and `systemctl daemon-reload && systemctl restart botdeck`. Manual runs: `PORT=3001 node server.js`.
 
 **Bot exits immediately**  
 Open the bot's **Console** and read the error. Common causes: wrong entry file,

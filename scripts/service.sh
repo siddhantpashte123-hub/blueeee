@@ -15,11 +15,35 @@ NAME="__SERVICE_NAME__"
 
 PID_FILE="${APP_DIR}/data/panel.pid"
 LOG_FILE="${APP_DIR}/data/panel.log"
+PORT_FILE="${APP_DIR}/data/port"
+
+# A port chosen with `botdeck port <n>` wins over the one baked in at install.
+if [ -f "$PORT_FILE" ]; then
+  SAVED_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
+  case "$SAVED_PORT" in
+    ''|*[!0-9]*) ;;
+    *) PORT="$SAVED_PORT" ;;
+  esac
+fi
+
+port_free() {
+  local p="$1"
+  "$NODE_BIN" -e '
+    const net = require("net");
+    const port = Number(process.argv[1]);
+    const server = net.createServer();
+    server.once("error", () => process.exit(1));
+    server.once("listening", () => server.close(() => process.exit(0)));
+    server.listen(port, "0.0.0.0");
+  ' "$p" >/dev/null 2>&1
+}
 
 # When called as root, drop to the service user so panel files stay owned by it.
 if [ "$(id -u)" -eq 0 ] && [ "$SERVICE_USER" != "root" ] && [ "$(id -un)" != "$SERVICE_USER" ]; then
   if command -v su >/dev/null 2>&1; then
-    exec su -s /bin/bash "$SERVICE_USER" -c "\"$0\" ${1:-status}"
+    if [ "$#" -eq 0 ]; then set -- status; fi
+    REEXEC="$(printf '%q ' "$0" "$@")"
+    exec su -s /bin/bash "$SERVICE_USER" -c "$REEXEC"
   fi
   echo "warning: 'su' not found — running the panel as root" >&2
 fi
@@ -38,6 +62,14 @@ cmd_start() {
     return 0
   fi
   mkdir -p "$APP_DIR/data" "$APP_DIR/bots"
+
+  if ! port_free "$PORT"; then
+    echo "Port ${PORT} is already in use by another program."
+    echo "Pick another port, for example:  $(basename "$0") port $((PORT + 1))"
+    echo "Then:                            $(basename "$0") restart"
+    return 1
+  fi
+
   cd "$APP_DIR" || return 1
 
   nohup env NODE_ENV=production PORT="$PORT" HOST=0.0.0.0 \
@@ -101,8 +133,32 @@ case "${1:-status}" in
   logs)
     tail -n 100 -f "$LOG_FILE"
     ;;
+  port)
+    case "${2:-}" in
+      ''|*[!0-9]*)
+        echo "usage: ${NAME} port <1-65535>"
+        exit 1
+        ;;
+    esac
+    if [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then
+      echo "Port must be between 1 and 65535"
+      exit 1
+    fi
+    mkdir -p "$APP_DIR/data"
+    echo "$2" > "$PORT_FILE"
+    PORT="$2"
+    echo "Port set to $2"
+    if is_running; then
+      echo "Restarting BotDeck on the new port…"
+      cmd_stop
+      sleep 1
+      cmd_start
+    else
+      echo "Start it with: ${NAME} start"
+    fi
+    ;;
   *)
-    echo "usage: ${NAME} {start|stop|restart|status|logs}"
+    echo "usage: ${NAME} {start|stop|restart|status|logs|port <n>}"
     exit 1
     ;;
 esac

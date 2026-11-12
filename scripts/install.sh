@@ -189,6 +189,37 @@ chown -R "${SERVICE_USER}:${SERVICE_USER}" "$APP_DIR"
 chmod 750 "$APP_DIR/data"
 ok "Files installed"
 
+# ---------------------------------------------------------------- ports ---
+port_free() {
+  local p="$1"
+  [ -n "$p" ] || return 1
+  if [ -n "${NODE_PATH_BIN:-}" ] && [ -x "${NODE_PATH_BIN:-}" ]; then
+    "$NODE_PATH_BIN" -e '
+      const net = require("net");
+      const port = Number(process.argv[1]);
+      const server = net.createServer();
+      server.once("error", () => process.exit(1));
+      server.once("listening", () => server.close(() => process.exit(0)));
+      server.listen(port, "0.0.0.0");
+    ' "$p" >/dev/null 2>&1
+    return $?
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"; then return 1; fi
+  fi
+  return 0
+}
+
+pick_free_port() {
+  local p="$1" i=0
+  while [ "$i" -lt 60 ]; do
+    if port_free "$p"; then echo "$p"; return 0; fi
+    p=$((p + 1))
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # --------------------------------------------------------------- service ---
 # systemd is great when it exists, but plenty of VPS/containers don't have it.
 # In that case BotDeck installs a tiny `botdeck` control script + cron autostart.
@@ -280,6 +311,37 @@ EOF
   fi
 }
 
+# Stop the previous BotDeck of this installation so its port is released.
+if [ "$SYSTEMD_OK" = "1" ] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+  info "Stopping the existing BotDeck service before upgrading"
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+fi
+
+if [ -f "${APP_DIR}/data/panel.pid" ]; then
+  OLD_PID="$(cat "${APP_DIR}/data/panel.pid" 2>/dev/null || true)"
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    info "Stopping the previously running panel (pid ${OLD_PID})"
+    kill -TERM "$OLD_PID" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$OLD_PID" 2>/dev/null || break
+      sleep 0.5
+    done
+    kill -KILL "$OLD_PID" 2>/dev/null || true
+  fi
+  rm -f "${APP_DIR}/data/panel.pid"
+fi
+
+# Port in use? Move to the next free one instead of failing the install.
+if ! port_free "$PORT"; then
+  info "Port ${PORT} is already in use by another program"
+  if NEW_PORT="$(pick_free_port $((PORT + 1)))"; then
+    warn "Using port ${NEW_PORT} for BotDeck instead (change later with: botdeck port <n>)"
+    PORT="$NEW_PORT"
+  else
+    die "Port ${PORT} is taken and no free port was found nearby. Re-run with PORT=<free port>."
+  fi
+fi
+
 if [ "$SYSTEMD_OK" = "1" ]; then
   install_systemd_service
 else
@@ -301,6 +363,7 @@ bold "   BotDeck is installed 🎉"
 bold "  ────────────────────────────────────────────────"
 echo
 echo "   Panel URL : http://${IP}:${PORT}"
+echo "   Port      : ${PORT}"
 echo "   App dir   : ${APP_DIR}"
 echo "   Data      : ${APP_DIR}/data"
 echo "   Bots      : ${APP_DIR}/bots"
