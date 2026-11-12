@@ -183,15 +183,21 @@ chown -R "${SERVICE_USER}:${SERVICE_USER}" "$APP_DIR"
 chmod 750 "$APP_DIR/data"
 ok "Files installed"
 
-# --------------------------------------------------------------- systemd ---
-if [ "${NO_SYSTEMD:-0}" = "1" ]; then
-  warn "NO_SYSTEMD=1 — skipping the systemd service"
-else
+# --------------------------------------------------------------- service ---
+# systemd is great when it exists, but plenty of VPS/containers don't have it.
+# In that case BotDeck installs a tiny `botdeck` control script + cron autostart.
+SYSTEMD_OK=0
+if [ "${NO_SYSTEMD:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
+  if systemctl show-environment >/dev/null 2>&1; then
+    SYSTEMD_OK=1
+  fi
+fi
+
+install_systemd_service() {
   info "Creating systemd service '${SERVICE_NAME}'"
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=BotDeck bot hosting panel (Docker-free)
-Documentation=https://github.com/
 After=network-online.target
 Wants=network-online.target
 
@@ -218,7 +224,7 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+  systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl restart "$SERVICE_NAME"
   sleep 1.5
 
@@ -227,6 +233,51 @@ EOF
   else
     warn "Service failed to start — check: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
   fi
+}
+
+install_standalone() {
+  local cli="/usr/local/bin/${SERVICE_NAME}"
+
+  info "systemd not detected — using standalone process control"
+  [ -f "${APP_DIR}/scripts/service.sh" ] || die "scripts/service.sh is missing from the installation"
+
+  sed -e "s|__APP_DIR__|${APP_DIR}|g" \
+      -e "s|__NODE_BIN__|${NODE_PATH_BIN}|g" \
+      -e "s|__PORT__|${PORT}|g" \
+      -e "s|__SERVICE_USER__|${SERVICE_USER}|g" \
+      -e "s|__SERVICE_NAME__|${SERVICE_NAME}|g" \
+      "${APP_DIR}/scripts/service.sh" > "$cli"
+  chmod 755 "$cli"
+  ok "Control script installed: ${cli}"
+
+  "$cli" stop >/dev/null 2>&1 || true
+  if "$cli" start; then
+    ok "Panel started"
+  else
+    warn "Panel did not start — check: ${SERVICE_NAME} logs"
+  fi
+
+  # Best-effort autostart without systemd.
+  local start_cron="su -s /bin/bash ${SERVICE_USER} -c '${cli} start' >/dev/null 2>&1"
+  if [ -d /etc/cron.d ]; then
+    cat > "/etc/cron.d/${SERVICE_NAME}" <<EOF
+# Start BotDeck at boot (no systemd on this host)
+@reboot root ${start_cron}
+EOF
+    chmod 644 "/etc/cron.d/${SERVICE_NAME}"
+    ok "Autostart entry added: /etc/cron.d/${SERVICE_NAME} (needs a running cron daemon)"
+  elif command -v crontab >/dev/null 2>&1; then
+    ( crontab -l 2>/dev/null | grep -Fv "${cli} start"; echo "@reboot ${start_cron}" ) | crontab - || true
+    ok "Autostart entry added to the root crontab (needs a running cron daemon)"
+  else
+    warn "No cron found — BotDeck will not start automatically after a reboot"
+  fi
+}
+
+if [ "$SYSTEMD_OK" = "1" ]; then
+  install_systemd_service
+else
+  install_standalone
 fi
 
 # --------------------------------------------------------------- network ---
@@ -250,10 +301,18 @@ echo "   Bots      : ${APP_DIR}/bots"
 echo
 echo "   Open the URL in your browser and create the admin password."
 echo
-echo "   Useful commands:"
-echo "     systemctl status ${SERVICE_NAME}"
-echo "     systemctl restart ${SERVICE_NAME}"
-echo "     journalctl -u ${SERVICE_NAME} -f"
+if [ "$SYSTEMD_OK" = "1" ]; then
+  echo "   Useful commands:"
+  echo "     systemctl status ${SERVICE_NAME}"
+  echo "     systemctl restart ${SERVICE_NAME}"
+  echo "     journalctl -u ${SERVICE_NAME} -f"
+else
+  echo "   Useful commands (no systemd):"
+  echo "     ${SERVICE_NAME} status"
+  echo "     ${SERVICE_NAME} restart"
+  echo "     ${SERVICE_NAME} logs"
+  echo "     tail -f ${APP_DIR}/data/panel.log"
+fi
 echo
 if [ "${PORT}" = "80" ] || [ "${PORT}" = "443" ]; then
   echo "   Port ${PORT} is privileged — make sure the firewall allows it."

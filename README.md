@@ -53,7 +53,7 @@ Node.js, Python, Bash aur custom shell command — sab runtimes supported hain.
 
 ## Requirements
 
-- Linux VPS (any distro with systemd recommended)
+- Linux VPS (systemd **or** no systemd — both work)
 - Node.js **18 or newer** (installer handles it)
 - ~100 MB RAM for the panel itself; plus whatever your bots use
 - Optional: `python3` for Python bots, `unzip`/`tar` for archive extraction
@@ -71,8 +71,9 @@ curl -fsSL https://raw.githubusercontent.com/siddhantpashte123-hub/blueeee/arena
 ```
 
 This downloads the latest source, installs Node.js if needed, creates the
-`botdeck` service user, copies the panel to `/opt/botdeck`, installs the systemd
-service and starts it. Then open `http://YOUR_SERVER_IP:3000`.
+`botdeck` service user, copies the panel to `/opt/botdeck`, sets up startup
+(systemd service, or a `botdeck` control script + cron when systemd is missing)
+and starts it. Then open `http://YOUR_SERVER_IP:3000`.
 
 > Once this branch is merged into `main`, you can use the shorter `.../main/...` URL.
 
@@ -89,19 +90,40 @@ The installer:
 1. installs Node.js 18+ if missing (NodeSource → distro package fallback),
 2. creates a dedicated `botdeck` system user,
 3. copies the panel to `/opt/botdeck`,
-4. installs and starts a **systemd** service named `botdeck`,
+4. installs and starts a **systemd** service named `botdeck` — or, on hosts
+   without systemd, the `botdeck` control script plus a cron autostart entry,
 5. opens the port in `ufw` if the firewall is active.
 
 Options:
 
 ```bash
 sudo APP_DIR=/srv/botdeck PORT=8080 SERVICE_USER=bots bash scripts/install.sh
-sudo NO_SYSTEMD=1 bash scripts/install.sh   # only copy files
+sudo NO_SYSTEMD=1 bash scripts/install.sh   # force the no-systemd standalone mode
 ```
 
 Then open `http://YOUR_SERVER_IP:3000` and create the admin password on first visit.
 
-### Manual (no systemd, no root)
+### Servers without systemd (containers, OpenVZ/LXC, minimal images)
+
+Many cheap VPS hosts ship **no systemd** at all (`systemctl: command not found`).
+The installer detects that automatically and installs a small control script
+instead of the unit — nothing manual needed:
+
+```bash
+botdeck status      # running? which pid/port
+botdeck start
+botdeck restart
+botdeck stop
+botdeck logs        # tail -f /opt/botdeck/data/panel.log
+```
+
+In this mode:
+
+- panel log: `/opt/botdeck/data/panel.log`
+- autostart: cron `@reboot` entry in `/etc/cron.d/botdeck` (when cron exists)
+- neither systemd nor cron? Start the panel after a reboot with `botdeck start`
+
+### Manual (foreground)
 
 ```bash
 cd botdeck
@@ -277,13 +299,23 @@ Environment variables (all optional):
 
 Panel name can be changed in **Panel settings** (stored in `data/panel.json`).
 
-### systemd commands
+### Service commands
+
+With systemd:
 
 ```bash
 systemctl status botdeck
 systemctl restart botdeck      # graceful: stops bots first, autostart bots come back
 journalctl -u botdeck -f       # panel logs
 journalctl -u botdeck -n 100 --no-pager
+```
+
+Without systemd:
+
+```bash
+botdeck status
+botdeck restart                # graceful, same behaviour
+botdeck logs                   # tail -f /opt/botdeck/data/panel.log
 ```
 
 ---
@@ -400,6 +432,14 @@ Use **Force kill** (SIGKILL). On the settings tab it's under *Danger zone*.
 
 **Live console not updating behind Nginx**  
 Set `proxy_buffering off;` and raise `proxy_read_timeout` for the location.
+
+**`systemctl: command not found` during install**  
+That host has no systemd. The current installer detects this and switches to
+standalone mode automatically (`botdeck` control script + cron autostart) —
+just re-run the install command.
+
+**`botdeck: command not found` (standalone install)**  
+The script is `/usr/local/bin/botdeck`; check that `/usr/local/bin` is in `PATH`.
 
 **Everything is unreachable**  
 `systemctl status botdeck`, then `journalctl -u botdeck -n 100 --no-pager`.
