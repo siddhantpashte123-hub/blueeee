@@ -1,0 +1,15 @@
+# Ignore runtime data (bots, logs, panel database)
+data/
+bots/
+*.log
+*.log.1
+
+# Dependencies (BotDeck itself has zero dependencies)
+node_modules/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
