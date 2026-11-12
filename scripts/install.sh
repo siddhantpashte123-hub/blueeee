@@ -65,13 +65,17 @@ echo
 fetch_tarball() {
   local ref="$1" dest="$2"
   if command -v curl >/dev/null 2>&1; then
+    # branch/tag name, then a raw commit sha, then the API as last resort
     curl -fsSL --connect-timeout 15 --max-time 180 \
       "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${ref}" -o "$dest" 2>/dev/null && return 0
+    curl -fsSL --connect-timeout 15 --max-time 180 \
+      "https://codeload.github.com/${REPO}/tar.gz/${ref}" -o "$dest" 2>/dev/null && return 0
     curl -fsSL --connect-timeout 15 --max-time 180 \
       -H 'Accept: application/vnd.github+json' \
       "https://api.github.com/repos/${REPO}/tarball/${ref}" -o "$dest" 2>/dev/null && return 0
   elif command -v wget >/dev/null 2>&1; then
     wget -q -T 30 -O "$dest" "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${ref}" 2>/dev/null && return 0
+    wget -q -T 30 -O "$dest" "https://codeload.github.com/${REPO}/tar.gz/${ref}" 2>/dev/null && return 0
     wget -q -T 30 -O "$dest" "https://api.github.com/repos/${REPO}/tarball/${ref}" 2>/dev/null && return 0
   fi
   return 1
