@@ -142,6 +142,16 @@ async function main() {
   check('installed list me hai', !!local, JSON.stringify(r.json.installed));
   check('modelId set hai', !!local.id);
 
+  console.log('\n[1b] RAM pre-flight guard');
+  // 8 GB ka sparse "model" — is VPS ki RAM (chhoti) me fit nahi hona chahiye
+  await fsp.writeFile(path.join(DATA, 'models', 'huge-fake.gguf'), '');
+  await fsp.truncate(path.join(DATA, 'models', 'huge-fake.gguf'), 8 * 1024 * 1024 * 1024).catch(() => {});
+  await request('POST', '/api/models/refresh');
+  const huge = (await request('GET', '/api/models')).json.installed.find((m) => /huge-fake/.test(m.name));
+  const hugeLoad = await request('POST', '/api/models/load', { id: huge.id });
+  check('bada model block hua (507)', hugeLoad.status === 507, `${hugeLoad.status} ${hugeLoad.text.slice(0, 120)}`);
+  check('error me RAM batayi', /RAM|GB/i.test((hugeLoad.json && hugeLoad.json.error) || ''), hugeLoad.text.slice(0, 160));
+
   console.log('\n[2] Engine load (spawn)');
   r = await request('POST', '/api/models/load', { id: local.id });
   check('load request ok', r.status === 200, r.text);

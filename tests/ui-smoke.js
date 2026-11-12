@@ -173,10 +173,12 @@ async function main() {
   check('sidebar hai', !!doc.querySelector('.sidebar'));
   check('composer hai', !!doc.querySelector('#prompt'));
   check('workspace panel hai', !!doc.querySelector('.aside'));
-  check('empty state suggestions hain', doc.querySelectorAll('.sugg').length >= 4);
+  await waitFor(() => doc.querySelectorAll('.sugg').length >= 4, 6000);
+  check('empty state suggestions hain', doc.querySelectorAll('.sugg').length >= 4, String(doc.querySelectorAll('.sugg').length));
 
   console.log('\n[2] Chat + streaming');
-  check('engine chip ready hai', /ready|model/i.test(doc.querySelector('#top-stats').textContent));
+  await waitFor(() => /ready|model|engine/i.test((doc.querySelector('#top-stats') || {}).textContent || ''), 6000);
+  check('engine chip ready hai', /ready|model|engine/i.test(doc.querySelector('#top-stats').textContent));
   const ta = doc.querySelector('#prompt');
   ta.value = 'Ek landing page banao';
   doc.querySelector('#btn-send').click();
@@ -186,6 +188,7 @@ async function main() {
   check('apply button hai', !!doc.querySelector('[data-apply]'));
   const finished = await waitFor(() => !doc.querySelector('#btn-stop') || doc.querySelector('#btn-stop').style.display === 'none', 15000);
   check('stream khatam hua', finished);
+  await waitFor(() => doc.querySelectorAll('.msg.user').length >= 1, 6000);
   check('user message dikha', doc.querySelectorAll('.msg.user').length >= 1);
   const chatCount = (await httpReq('GET', '/api/chats')).json.chats.length;
   check('chat save hua', chatCount >= 1, String(chatCount));

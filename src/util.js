@@ -105,13 +105,33 @@ function fmtBytes(n) {
   return `${n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)} ${u[i]}`;
 }
 
+/**
+ * Container/cgroup limit (VPS aksar ye hota hai).
+ * Ye na ho to /proc/meminfo host ki RAM dikhata hai — container ki nahi.
+ */
+function cgroupMemMb() {
+  const files = ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes'];
+  for (const f of files) {
+    try {
+      const raw = fs.readFileSync(f, 'utf8').trim();
+      if (!raw || raw === 'max') continue;
+      const n = parseInt(raw, 10);
+      // "unlimited" values (jaise 9.2e18) ignore karo
+      if (Number.isFinite(n) && n > 0 && n < 1e15) return Math.floor(n / 1048576);
+    } catch {}
+  }
+  return null;
+}
+
 function hostMemMb() {
+  let host = Math.floor(os.totalmem() / 1048576);
   try {
     const txt = fs.readFileSync('/proc/meminfo', 'utf8');
     const m = /MemTotal:\s+(\d+) kB/.exec(txt);
-    if (m) return Math.floor(parseInt(m[1], 10) / 1024);
+    if (m) host = Math.floor(parseInt(m[1], 10) / 1024);
   } catch {}
-  return Math.floor(os.totalmem() / 1048576);
+  const lim = cgroupMemMb();
+  return lim && lim < host ? lim : host;
 }
 
 function memInfo() {
@@ -251,6 +271,7 @@ module.exports = {
   portFree,
   fmtBytes,
   hostMemMb,
+  cgroupMemMb,
   memInfo,
   procInfo,
   pidAlive,

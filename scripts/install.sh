@@ -56,7 +56,18 @@ pick_free_port() {
   done
   return 1
 }
-ram_mb() { awk '/MemTotal/{print int($2/1024)}' /proc/meminfo; }
+ram_mb() {
+  local host lim=""
+  host=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+  for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+    [ -r "$f" ] || continue
+    local v
+    v=$(tr -dc '0-9' < "$f" 2>/dev/null)
+    [ -n "$v" ] || continue
+    if [ "$v" -gt 0 ] && [ "$v" -lt 1000000000000000 ]; then lim=$((v / 1024 / 1024)); break; fi
+  done
+  if [ -n "$lim" ] && [ "$lim" -lt "$host" ]; then echo "$lim"; else echo "$host"; fi
+}
 
 # ------------------------------------------------------------------ 1. node
 step "1/7  Node.js"

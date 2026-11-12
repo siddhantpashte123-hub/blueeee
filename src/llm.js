@@ -12,7 +12,7 @@ const { spawn } = require('child_process');
 const cfg = require('./config');
 const store = require('./store');
 const models = require('./models');
-const { which, sleep, procInfo, pidAlive } = require('./util');
+const { which, sleep, procInfo, pidAlive, hostMemMb } = require('./util');
 
 const state = {
   mode: 'local', // local | external
@@ -124,6 +124,25 @@ async function load(modelId, { force = false } = {}) {
     await fsp.access(file, fs.constants.R_OK);
   } catch {
     throw Object.assign(new Error('Model file nahi mili — dobara download karein'), { status: 409 });
+  }
+
+  // RAM pre-flight: model VPS me fit hoga ya nahi
+  try {
+    const st = await fsp.stat(file);
+    const needMb = Math.ceil((st.size * 1.15) / 1048576) + 512;
+    const haveMb = hostMemMb();
+    if (needMb > haveMb) {
+      throw Object.assign(
+        new Error(
+          `Ye model ~${(needMb / 1024).toFixed(1)} GB RAM maangta hai, is VPS me ${(haveMb / 1024).toFixed(1)} GB hai. ` +
+            'Chhota model download karein (Qwen2.5-Coder 1.5B) — warna panel OOM se band ho sakta hai.'
+        ),
+        { status: 507 }
+      );
+    }
+    log(`ram check: need ~${needMb} MB, available ${haveMb} MB`);
+  } catch (e) {
+    if (e.status) throw e;
   }
 
   const bin = await resolveBinary();
