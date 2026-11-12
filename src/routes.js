@@ -1,576 +1,394 @@
 'use strict';
-
+/**
+ * HTTP API. Har route yahin hai — server.js sirf wiring karta hai.
+ */
 const fs = require('fs');
 const fsp = fs.promises;
-const path = require('path');
-const { HttpError, uid, cleanString, safeJoin, formatBytes } = require('./util');
-const { TEMPLATES } = require('./templates');
-const files = require('./files');
+const os = require('os');
+const cfg = require('./config');
+const store = require('./store');
+const auth = require('./auth');
+const vms = require('./vms');
+const qemu = require('./qemu');
+const images = require('./images');
+const packageJson = require('../package.json');
 
-const RUNTIMES = ['node', 'python', 'bash', 'custom'];
-
-function attachmentName(name, fallback = 'download') {
-  const clean = String(name || '')
-    .replace(/[^A-Za-z0-9._ -]+/g, '_')
-    .replace(/\s+/g, '_')
-    .slice(0, 120);
-  return clean || fallback;
-}
-const ACTIONS = new Set(['start', 'stop', 'restart', 'kill']);
-
-function validateEntry(entry) {
-  const value = cleanString(entry, 300).trim();
-  if (!value) return '';
-  const norm = value.replace(/\\/g, '/');
-  if (norm.startsWith('/')) throw new HttpError(400, 'Entry must be relative to the bot folder');
-  if (norm.split('/').includes('..')) throw new HttpError(400, 'Entry path cannot contain ".."');
-  return norm;
+// ---------- helpers ----------
+function json(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store'
+  });
+  res.end(body);
 }
 
-function parseEnv(input) {
-  if (input == null) return {};
-  if (typeof input !== 'object' || Array.isArray(input)) {
-    throw new HttpError(400, 'Environment variables must be a key/value object');
-  }
-  const entries = Object.entries(input);
-  if (entries.length > 100) throw new HttpError(400, 'Maximum 100 environment variables');
-  const out = {};
-  for (const [key, value] of entries) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-      throw new HttpError(400, `Invalid variable name "${key}" (use A-Z, 0-9 and _)`);
-    }
-    out[key] = cleanString(value, 4000);
-  }
-  return out;
+function fail(res, err) {
+  const code = err && err.status ? err.status : 500;
+  if (code >= 500) console.error('[api]', err && err.stack ? err.stack : err);
+  json(res, code, { error: (err && err.message) || 'Server error' });
 }
 
-function botFields(input, { partial = false } = {}) {
-  const out = {};
-
-  if (!partial || input.name !== undefined) {
-    const name = cleanString(input.name, 40).trim();
-    if (!name) throw new HttpError(400, 'Bot name is required');
-    out.name = name;
-  }
-
-  if (!partial || input.runtime !== undefined) {
-    const runtime = cleanString(input.runtime || 'node', 20);
-    if (!RUNTIMES.includes(runtime)) {
-      throw new HttpError(400, `Runtime must be one of: ${RUNTIMES.join(', ')}`);
-    }
-    out.runtime = runtime;
-  }
-
-  if (!partial || input.entry !== undefined) {
-    out.entry = validateEntry(input.entry);
-  }
-
-  if (input.args !== undefined) out.args = cleanString(input.args, 500);
-  if (input.description !== undefined) out.description = cleanString(input.description, 300);
-  if (input.env !== undefined) out.env = parseEnv(input.env);
-
-  if (input.port !== undefined) {
-    if (input.port === null || input.port === '' || Number(input.port) === 0) out.port = null;
-    else {
-      const port = Number(input.port);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HttpError(400, 'Port must be 1–65535');
-      out.port = port;
-    }
-  }
-
-  if (input.memoryLimitMB !== undefined) {
-    const limit = Number(input.memoryLimitMB) || 0;
-    if (limit < 0 || limit > 65536) throw new HttpError(400, 'Memory limit must be between 0 and 65536 MB');
-    out.memoryLimitMB = Math.round(limit);
-  }
-
-  if (input.maxRestarts !== undefined) {
-    const max = Number(input.maxRestarts);
-    if (!Number.isInteger(max) || max < 0 || max > 1000) throw new HttpError(400, 'Max restarts must be 0–1000');
-    out.maxRestarts = max;
-  }
-
-  if (input.autoRestart !== undefined) out.autoRestart = Boolean(input.autoRestart);
-  if (input.autostart !== undefined) out.autostart = Boolean(input.autostart);
-
-  return out;
+async function body(req, limit = cfg.MAX_JSON_BODY) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(Object.assign(new Error('Request body too large'), { status: 413 }));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8').trim();
+      if (!raw) return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(Object.assign(new Error('Invalid JSON'), { status: 400 }));
+      }
+    });
+    req.on('error', reject);
+  });
 }
 
-function botOr404(ctx) {
-  const bot = ctx.store.getBot(ctx.params.id);
-  if (!bot) throw new HttpError(404, 'Bot not found');
-  return bot;
+function clientIp(req) {
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
 }
 
-async function botOverview(ctx, bot) {
-  const usage = ctx.metrics.botUsage(ctx.supervisor.pids()).get(bot.id);
-  return Object.assign(ctx.supervisor.serialize(bot), usage || { cpu: 0, mem: 0, processes: 0 });
-}
-
-module.exports = function registerRoutes(r, app) {
-  const { cfg, store, supervisor, metrics, auth } = app;
-
-  /* ----------------------------- auth -------------------------------- */
-
-  r.get('/api/health', (ctx) => ctx.json({ ok: true, uptime: process.uptime() }));
-
-  r.get('/api/auth/status', (ctx) =>
-    ctx.json({
-      setup: auth.needsSetup,
-      panelName: store.settings.panelName,
-      version: app.version || '1.0.0'
-    })
+function isSecure(req) {
+  return (
+    !!req.socket.encrypted ||
+    String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https'
   );
+}
 
-  r.post('/api/auth/setup', async (ctx) => {
-    const body = await ctx.body();
-    const token = await auth.setup(body.password);
-    ctx.setSession(token);
-    ctx.json({ token, panelName: store.settings.panelName });
-  });
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    const o = new URL(origin);
+    const host = String(req.headers.host || '');
+    return o.host === host;
+  } catch {
+    return false;
+  }
+}
 
-  r.post('/api/auth/login', async (ctx) => {
-    const body = await ctx.body();
-    const token = await auth.login(body.password, ctx.ip);
-    ctx.setSession(token);
-    ctx.json({ token, panelName: store.settings.panelName });
-  });
+// ---------- routes ----------
+function build(server) {
+  const r = server.router;
 
-  r.post('/api/auth/logout', (ctx) => {
-    auth.destroy(ctx.token);
-    ctx.clearSession();
-    ctx.json({ ok: true });
-  });
-
-  r.get('/api/me', (ctx) =>
-    ctx.json({
-      authenticated: true,
-      panelName: store.settings.panelName,
-      hostname: require('os').hostname(),
-      installedAt: store.settings.installedAt,
-      lastLoginAt: store.settings.lastLoginAt
-    })
-  );
-
-  r.post('/api/auth/password', async (ctx) => {
-    const body = await ctx.body();
-    const token = await auth.changePassword(body.current, body.next);
-    ctx.setSession(token);
-    ctx.json({ ok: true, token });
-  });
-
-  /* --------------------------- dashboard ----------------------------- */
-
-  r.get('/api/overview', async (ctx) => {
-    const bots = await Promise.all(store.bots.map((bot) => botOverview(ctx, bot)));
-    const system = metrics.system();
-    const counts = {
-      total: bots.length,
-      running: bots.filter((b) => b.status === 'running').length,
-      stopped: bots.filter((b) => b.status === 'stopped').length,
-      crashed: bots.filter((b) => b.status === 'crashed').length,
-      restarting: bots.filter((b) => b.status === 'restarting').length
-    };
-    const botMem = bots.reduce((sum, b) => sum + (b.mem || 0), 0);
-    ctx.json({
-      bots,
-      counts,
-      system,
-      botMemory: botMem,
-      dirs: { bots: cfg.BOTS_DIR, data: cfg.DATA_DIR },
-      panelName: store.settings.panelName
+  // ---- public ----
+  r.get('/api/health', async (req, res) => {
+    const e = await qemu.env();
+    json(res, 200, {
+      ok: true,
+      name: 'VPSDeck',
+      version: packageJson.version,
+      setupNeeded: auth.needsSetup(),
+      qemu: !!e.qemuBin,
+      qemuImg: !!e.qemuImg,
+      kvm: e.kvm,
+      accel: e.kvm ? 'kvm' : 'tcg'
     });
   });
 
-  /* ------------------------------ bots ------------------------------- */
-
-  r.get('/api/bots', async (ctx) => {
-    const bots = await Promise.all(store.bots.map((bot) => botOverview(ctx, bot)));
-    ctx.json({ bots });
+  r.get('/api/auth/state', async (req, res) => {
+    const s = auth.sessionFromReq(req);
+    json(res, 200, { needsSetup: auth.needsSetup(), authed: !!s, user: s ? s.user : null });
   });
 
-  r.post('/api/bots', async (ctx) => {
-    const input = await ctx.body();
-    const fields = botFields(input);
-    if (store.bots.some((b) => b.name.toLowerCase() === fields.name.toLowerCase())) {
-      throw new HttpError(409, 'A bot with this name already exists');
-    }
-    const runtime = fields.runtime;
-    const template = TEMPLATES[runtime];
-    const id = uid('bot');
-    const dir = supervisor.botDir(id);
-    await fsp.mkdir(dir, { recursive: true });
-
-    const entry = fields.entry || template.file;
-    if (input.template !== false && template) {
-      const target = safeJoin(dir, template.file);
-      try {
-        await fsp.access(target);
-      } catch (_) {
-        await fsp.writeFile(target, template.body(fields.name), { mode: template.mode });
-      }
-    }
-
-    const now = Date.now();
-    const bot = {
-      id,
-      name: fields.name,
-      runtime,
-      entry,
-      args: fields.args || '',
-      env: fields.env || {},
-      port: fields.port || null,
-      description: fields.description || '',
-      autoRestart: fields.autoRestart !== undefined ? fields.autoRestart : true,
-      maxRestarts: fields.maxRestarts !== undefined ? fields.maxRestarts : 10,
-      autostart: Boolean(fields.autostart),
-      memoryLimitMB: fields.memoryLimitMB || 0,
-      createdAt: now,
-      updatedAt: now,
-      totalRuns: 0,
-      lastExit: null
-    };
-    store.addBot(bot);
-    supervisor.sys(id, `Bot created — runtime: ${runtime}, entry: ${entry}`);
-    supervisor.sys(id, `Working folder: ${dir}`);
-
-    if (input.start) {
-      try {
-        await supervisor.start(id);
-      } catch (err) {
-        supervisor.sys(id, `Start failed: ${err.message}`);
-      }
-    }
-
-    ctx.json({ bot: await botOverview(ctx, bot) }, 201);
-  });
-
-  // bulk actions must be declared before /:id routes
-  r.post('/api/bots/actions', async (ctx) => {
-    const body = await ctx.body();
-    const action = String(body.action || '');
-    if (!['start-all', 'stop-all', 'restart-all'].includes(action)) {
-      throw new HttpError(400, 'Unknown bulk action');
-    }
-    const results = { ok: 0, failed: 0 };
-    for (const bot of store.bots) {
-      try {
-        if (action === 'start-all') {
-          if (supervisor.state(bot.id).status === 'running') continue;
-          await supervisor.start(bot.id);
-        } else if (action === 'stop-all') {
-          await supervisor.stop(bot.id);
-        } else {
-          await supervisor.restart(bot.id);
-        }
-        results.ok++;
-      } catch (_) {
-        results.failed++;
-      }
-    }
-    ctx.json(results);
-  });
-
-  r.get('/api/bots/:id', async (ctx) => {
-    const bot = botOr404(ctx);
-    ctx.json({ bot: await botOverview(ctx, bot), dir: supervisor.botDir(bot.id) });
-  });
-
-  r.patch('/api/bots/:id', async (ctx) => {
-    const bot = botOr404(ctx);
-    const input = await ctx.body();
-    const patch = botFields(input, { partial: true });
-    if (patch.name && patch.name.toLowerCase() !== bot.name.toLowerCase()) {
-      if (store.bots.some((b) => b.id !== bot.id && b.name.toLowerCase() === patch.name.toLowerCase())) {
-        throw new HttpError(409, 'Another bot already uses this name');
-      }
-    }
-    if (patch.runtime && patch.runtime !== bot.runtime && input.entry === undefined) {
-      const template = TEMPLATES[patch.runtime];
-      if (template) patch.entry = template.file;
-    }
-    const updated = store.updateBot(bot.id, patch);
-    supervisor.sys(bot.id, 'Configuration updated');
-    ctx.json({ bot: await botOverview(ctx, updated) });
-  });
-
-  r.post('/api/bots/:id/clone', async (ctx) => {
-    const source = botOr404(ctx);
-    const body = await ctx.body();
-    const wanted = cleanString(body.name, 40).trim() || `${source.name} copy`;
-    let name = wanted;
-    let suffix = 2;
-    while (store.bots.some((b) => b.name.toLowerCase() === name.toLowerCase())) {
-      name = `${wanted} ${suffix++}`.slice(0, 40);
-    }
-
-    const id = uid('bot');
-    const dir = supervisor.botDir(id);
-    await fsp.mkdir(dir, { recursive: true });
+  r.post('/api/auth/setup', async (req, res) => {
     try {
-      await fsp.cp(supervisor.botDir(source.id), dir, { recursive: true, force: true });
-    } catch (err) {
-      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
-      throw new HttpError(500, `Could not copy bot files: ${err.message}`);
+      if (!auth.needsSetup()) throw Object.assign(new Error('Panel pehle se set hai'), { status: 409 });
+      const b = await body(req);
+      await auth.setPassword(b.password);
+      const token = auth.createSession('admin', clientIp(req));
+      res.setHeader('Set-Cookie', auth.sessionCookie(token, isSecure(req)));
+      json(res, 200, { ok: true, user: 'admin' });
+    } catch (e) {
+      fail(res, e);
     }
-
-    const now = Date.now();
-    const clone = {
-      id,
-      name,
-      runtime: source.runtime,
-      entry: source.entry,
-      args: source.args || '',
-      env: JSON.parse(JSON.stringify(source.env || {})),
-      port: null,
-      description: source.description || '',
-      autoRestart: source.autoRestart !== false,
-      maxRestarts: source.maxRestarts ?? 10,
-      autostart: false,
-      memoryLimitMB: source.memoryLimitMB || 0,
-      createdAt: now,
-      updatedAt: now,
-      totalRuns: 0,
-      lastExit: null,
-      lastStartedAt: null
-    };
-    store.addBot(clone);
-    supervisor.sys(id, `Cloned from "${source.name}"`);
-    supervisor.sys(id, `Working folder: ${dir}`);
-    ctx.json({ bot: await botOverview(ctx, clone) }, 201);
   });
 
-  r.delete('/api/bots/:id', async (ctx) => {
-    const bot = botOr404(ctx);
-    const deleteFiles = ctx.query.get('files') === '1' || ctx.query.get('files') === 'true';
-    const dir = supervisor.botDir(bot.id);
-    await supervisor.remove(bot.id);
-    store.removeBot(bot.id);
-    if (deleteFiles) {
-      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
-    }
-    ctx.json({ ok: true, deletedFiles: deleteFiles });
-  });
-
-  r.post('/api/bots/:id/input', async (ctx) => {
-    const bot = botOr404(ctx);
-    const body = await ctx.body();
-    supervisor.sendInput(bot.id, String(body.data ?? ''));
-    ctx.json({ ok: true });
-  });
-
-  r.post('/api/bots/:id/:action', async (ctx) => {
-    const bot = botOr404(ctx);
-    const action = ctx.params.action;
-    if (!ACTIONS.has(action)) throw new HttpError(404, 'Unknown action');
-
-    if (action === 'start') {
-      const result = await supervisor.start(bot.id, { byUser: true });
-      return ctx.json({ ok: true, ...result });
-    }
-    if (action === 'stop') {
-      const result = await supervisor.stop(bot.id);
-      return ctx.json(result);
-    }
-    if (action === 'kill') {
-      const result = await supervisor.stop(bot.id, { force: true });
-      return ctx.json(result);
-    }
-    const result = await supervisor.restart(bot.id);
-    return ctx.json({ ok: true, ...result });
-  });
-
-  /* ------------------------------ logs ------------------------------- */
-
-  r.get('/api/bots/:id/logs', async (ctx) => {
-    const bot = botOr404(ctx);
-    const lines = Math.min(Math.max(Number(ctx.query.get('lines')) || 300, 10), 2000);
-    const entries = await supervisor.tailLogs(bot.id, lines);
-    ctx.json({ logs: entries, status: supervisor.serialize(bot).status });
-  });
-
-  r.delete('/api/bots/:id/logs', (ctx) => {
-    const bot = botOr404(ctx);
-    supervisor.clearLogs(bot.id);
-    ctx.json({ ok: true });
-  });
-
-  r.get('/api/bots/:id/logs/download', async (ctx) => {
-    const bot = botOr404(ctx);
-    const file = supervisor.logPath(bot.id);
-    let stat = null;
+  r.post('/api/auth/login', async (req, res) => {
     try {
-      stat = await fsp.stat(file);
-    } catch (_) {
-      /* no logs */
+      const ip = clientIp(req);
+      if (auth.rateLimited(ip)) {
+        throw Object.assign(new Error('Bahut zyada galat koshish — 5 minute baad try karein'), { status: 429 });
+      }
+      const b = await body(req);
+      const st = store.get();
+      const ok = st.auth && auth.verifyPassword(b.password, st.auth.hash);
+      if (!ok) {
+        auth.bumpTry(ip);
+        throw Object.assign(new Error('Galat password'), { status: 401 });
+      }
+      auth.clearTries(ip);
+      const token = auth.createSession(st.auth.user || 'admin', ip);
+      res.setHeader('Set-Cookie', auth.sessionCookie(token, isSecure(req)));
+      json(res, 200, { ok: true, user: st.auth.user || 'admin' });
+    } catch (e) {
+      fail(res, e);
     }
-    if (!stat || !stat.size) throw new HttpError(404, 'No logs yet');
-    const safeName = attachmentName(bot.name, 'bot');
-    ctx.res.writeHead(200, {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Content-Disposition': `attachment; filename="${safeName}.log"`,
-      'Content-Length': stat.size
-    });
-    fs.createReadStream(file).pipe(ctx.res);
   });
 
-  r.get('/api/bots/:id/stream', (ctx) => {
-    const bot = botOr404(ctx);
-    const { res, req } = ctx;
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no'
-    });
-    res.write(': connected\n\n');
-
-    const send = (event, data) => {
-      if (res.writableEnded) return;
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    };
-
-    const state = supervisor.state(bot.id);
-    send('status', { status: state.status, pid: state.pid, restarts: state.restarts });
-
-    const onLog = (payload) => {
-      if (payload.id === bot.id) send('log', payload.entry);
-    };
-    const onStatus = (payload) => {
-      if (payload.id === bot.id) send('status', payload);
-    };
-
-    supervisor.on('log', onLog);
-    supervisor.on('status', onStatus);
-
-    const heartbeat = setInterval(() => {
-      if (!res.writableEnded) res.write(': ping\n\n');
-    }, 20000);
-    heartbeat.unref?.();
-
-    const cleanup = () => {
-      clearInterval(heartbeat);
-      supervisor.removeListener('log', onLog);
-      supervisor.removeListener('status', onStatus);
-    };
-    req.on('close', cleanup);
-    res.on('close', cleanup);
+  r.post('/api/auth/logout', async (req, res) => {
+    const s = auth.sessionFromReq(req);
+    if (s) auth.destroySession(s.token);
+    res.setHeader('Set-Cookie', auth.clearCookie());
+    json(res, 200, { ok: true });
   });
 
-  /* ------------------------------ files ------------------------------ */
-
-  r.get('/api/bots/:id/files', async (ctx) => {
-    const bot = botOr404(ctx);
-    const root = supervisor.botDir(bot.id);
-    await fsp.mkdir(root, { recursive: true });
-    const result = await files.listDir(root, ctx.query.get('path') || '');
-    ctx.json(result);
+  // ---- public console (friend share link) ----
+  r.get('/api/public/console/:token', async (req, res, ctx) => {
+    const vm = (store.get().vms || []).find((v) => v.shareToken === ctx.params.token);
+    if (!vm) return json(res, 404, { error: 'Link valid nahi hai' });
+    await consoleStream(req, res, vm, { writable: true });
   });
 
-  r.get('/api/bots/:id/files/read', async (ctx) => {
-    const bot = botOr404(ctx);
-    const rel = ctx.query.get('path');
-    if (!rel) throw new HttpError(400, 'path is required');
-    ctx.json(await files.readFile(supervisor.botDir(bot.id), rel, cfg.MAX_EDIT_BYTES));
+  r.post('/api/public/console/:token', async (req, res, ctx) => {
+    const vm = (store.get().vms || []).find((v) => v.shareToken === ctx.params.token);
+    if (!vm) return json(res, 404, { error: 'Link valid nahi hai' });
+    return consoleInput(req, res, vm);
   });
 
-  r.put('/api/bots/:id/files/write', async (ctx) => {
-    const bot = botOr404(ctx);
-    const rel = ctx.query.get('path');
-    if (!rel) throw new HttpError(400, 'path is required');
-    const body = await ctx.body();
-    if (typeof body.content !== 'string') throw new HttpError(400, 'content must be a string');
-    if (Buffer.byteLength(body.content) > cfg.MAX_EDIT_BYTES) throw new HttpError(413, 'File is too large');
-    ctx.json(await files.writeFile(supervisor.botDir(bot.id), rel, body.content));
-  });
+  // ---- everything else needs login ----
+  const guard = (handler) => async (req, res, ctx) => {
+    const s = auth.sessionFromReq(req);
+    if (!s) return json(res, 401, { error: 'Login karein' });
+    if (req.method !== 'GET' && !sameOrigin(req)) {
+      return json(res, 403, { error: 'Bad origin' });
+    }
+    ctx.session = s;
+    try {
+      await handler(req, res, ctx);
+    } catch (e) {
+      fail(res, e);
+    }
+  };
 
-  r.put(
-    '/api/bots/:id/files/upload',
-    async (ctx) => {
-      const bot = botOr404(ctx);
-      const dir = ctx.query.get('path') || '';
-      const name = ctx.query.get('name');
-      if (!name) throw new HttpError(400, 'name is required');
-      const result = await files.saveUpload(
-        supervisor.botDir(bot.id),
-        dir,
-        name,
-        ctx.req,
-        cfg.MAX_UPLOAD_BYTES
-      );
-      supervisor.sys(bot.id, `Uploaded ${result.path} (${formatBytes(result.size)})`);
-      ctx.json(result);
-    },
-    { raw: true }
-  );
-
-  r.get('/api/bots/:id/files/download', async (ctx) => {
-    const bot = botOr404(ctx);
-    const rel = ctx.query.get('path');
-    if (!rel) throw new HttpError(400, 'path is required');
-    const root = supervisor.botDir(bot.id);
-    const target = safeJoin(root, rel);
-    const stat = await fsp.stat(target).catch(() => null);
-    if (!stat) throw new HttpError(404, 'File not found');
-    if (stat.isDirectory()) throw new HttpError(400, 'Cannot download a folder');
-    ctx.res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${attachmentName(path.basename(target))}"`,
-      'Content-Length': stat.size
-    });
-    fs.createReadStream(target).pipe(ctx.res);
-  });
-
-  r.post('/api/bots/:id/files/mkdir', async (ctx) => {
-    const bot = botOr404(ctx);
-    const body = await ctx.body();
-    ctx.json(await files.mkdir(supervisor.botDir(bot.id), body.path));
-  });
-
-  r.post('/api/bots/:id/files/rename', async (ctx) => {
-    const bot = botOr404(ctx);
-    const body = await ctx.body();
-    ctx.json(await files.rename(supervisor.botDir(bot.id), body.from, body.to));
-  });
-
-  r.post('/api/bots/:id/files/delete', async (ctx) => {
-    const bot = botOr404(ctx);
-    const body = await ctx.body();
-    const result = await files.remove(supervisor.botDir(bot.id), body.path);
-    supervisor.sys(bot.id, `Deleted ${body.path}`);
-    ctx.json(result);
-  });
-
-  r.post('/api/bots/:id/files/extract', async (ctx) => {
-    const bot = botOr404(ctx);
-    const body = await ctx.body();
-    const result = await files.extract(supervisor.botDir(bot.id), body.path);
-    supervisor.sys(bot.id, `Extracted ${body.path}`);
-    ctx.json(result);
-  });
-
-  /* ---------------------------- settings ----------------------------- */
-
-  r.get('/api/settings', (ctx) =>
-    ctx.json({
-      panelName: store.settings.panelName,
-      botsDir: cfg.BOTS_DIR,
-      dataDir: cfg.DATA_DIR,
-      port: cfg.PORT,
-      logMaxBytes: cfg.LOG_MAX_BYTES,
+  r.get('/api/system', guard(async (req, res) => {
+    const e = await qemu.env({ refresh: true });
+    json(res, 200, {
+      version: packageJson.version,
       node: process.version,
-      uptime: process.uptime()
-    })
-  );
+      host: os.hostname(),
+      uptime: process.uptime(),
+      cpus: os.cpus().length,
+      load: require('./util').hostLoad(),
+      mem: { total: os.totalmem(), free: os.freemem() },
+      qemu: { bin: e.qemuBin, img: e.qemuImg, version: e.version, kvm: e.kvm, kvmReason: e.kvmReason },
+      accel: e.kvm ? 'kvm' : 'tcg',
+      settings: store.get().settings || {},
+      stats: await vms.stats(),
+      x86: process.arch
+    });
+  }));
 
-  r.patch('/api/settings', async (ctx) => {
-    const body = await ctx.body();
-    if (body.panelName !== undefined) {
-      const name = cleanString(body.panelName, 40).trim();
-      if (!name) throw new HttpError(400, 'Panel name cannot be empty');
-      store.settings.panelName = name;
-      await store.save(true);
+  r.post('/api/settings', guard(async (req, res) => {
+    const b = await body(req);
+    const patch = {};
+    if (b.sshHost !== undefined) patch.sshHost = String(b.sshHost).trim().slice(0, 120);
+    if (b.panelName !== undefined) patch.panelName = String(b.panelName).trim().slice(0, 60);
+    if (b.tunnelHint !== undefined) patch.tunnelHint = String(b.tunnelHint).slice(0, 200);
+    await store.update((s) => {
+      s.settings = Object.assign({}, s.settings, patch);
+    });
+    json(res, 200, { ok: true, settings: store.get().settings });
+  }));
+
+  r.post('/api/panel/password', guard(async (req, res) => {
+    const b = await body(req);
+    const st = store.get();
+    if (!auth.verifyPassword(b.current || '', st.auth.hash)) {
+      throw Object.assign(new Error('Purana password galat hai'), { status: 401 });
     }
-    ctx.json({ ok: true, panelName: store.settings.panelName });
+    await auth.setPassword(b.next);
+    const token = auth.createSession('admin', clientIp(req));
+    res.setHeader('Set-Cookie', auth.sessionCookie(token, isSecure(req)));
+    json(res, 200, { ok: true });
+  }));
+
+  // ---- vms ----
+  r.get('/api/vms', guard(async (req, res) => {
+    json(res, 200, { vms: await vms.list() });
+  }));
+
+  r.post('/api/vms', guard(async (req, res) => {
+    const b = await body(req);
+    const vm = await vms.create(b);
+    json(res, 201, { vm });
+  }));
+
+  r.get('/api/vms/:id', guard(async (req, res, ctx) => {
+    const vm = await vms.get(ctx.params.id);
+    json(res, 200, { vm });
+  }));
+
+  r.patch('/api/vms/:id', guard(async (req, res, ctx) => {
+    const b = await body(req);
+    json(res, 200, { vm: await vms.update(ctx.params.id, b) });
+  }));
+
+  r.delete('/api/vms/:id', guard(async (req, res, ctx) => {
+    json(res, 200, await vms.remove(ctx.params.id));
+  }));
+
+  r.post('/api/vms/:id/start', guard(async (req, res, ctx) => {
+    json(res, 200, { vm: await vms.start(ctx.params.id) });
+  }));
+
+  r.post('/api/vms/:id/stop', guard(async (req, res, ctx) => {
+    await vms.stop(ctx.params.id);
+    json(res, 200, { ok: true, vm: await vms.get(ctx.params.id, { fresh: true }) });
+  }));
+
+  r.post('/api/vms/:id/restart', guard(async (req, res, ctx) => {
+    json(res, 200, { vm: await vms.restart(ctx.params.id) });
+  }));
+
+  r.post('/api/vms/:id/reinstall', guard(async (req, res, ctx) => {
+    json(res, 200, { vm: await vms.reinstall(ctx.params.id) });
+  }));
+
+  r.post('/api/vms/:id/clone', guard(async (req, res, ctx) => {
+    const b = await body(req).catch(() => ({}));
+    json(res, 201, { vm: await vms.clone(ctx.params.id, b) });
+  }));
+
+  r.post('/api/vms/:id/resize', guard(async (req, res, ctx) => {
+    const b = await body(req);
+    json(res, 200, { vm: await vms.resize(ctx.params.id, b.diskGB) });
+  }));
+
+  r.get('/api/vms/:id/ssh', guard(async (req, res, ctx) => {
+    const vm = await vms.get(ctx.params.id);
+    const st = store.get().settings || {};
+    const ip = st.sshHost || req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
+    const hostOnly = String(ip).split(':')[0];
+    json(res, 200, {
+      host: hostOnly,
+      port: vm.sshPort,
+      user: vm.user,
+      password: vm.password,
+      command: `ssh -p ${vm.sshPort} ${vm.user}@${hostOnly}`,
+      note: 'Port sirf VPS ke localhost par khula hai — laptop se seedha connect karne ke liye tunnel chahiye.'
+    });
+  }));
+
+  // ---- snapshots ----
+  r.get('/api/vms/:id/snapshots', guard(async (req, res, ctx) => {
+    json(res, 200, { snapshots: await vms.snapshots(ctx.params.id) });
+  }));
+
+  r.post('/api/vms/:id/snapshots', guard(async (req, res, ctx) => {
+    const b = await body(req);
+    json(res, 200, await vms.snapshotCreate(ctx.params.id, b.tag));
+  }));
+
+  r.post('/api/vms/:id/snapshots/:tag/restore', guard(async (req, res, ctx) => {
+    json(res, 200, await vms.snapshotRestore(ctx.params.id, ctx.params.tag));
+  }));
+
+  r.delete('/api/vms/:id/snapshots/:tag', guard(async (req, res, ctx) => {
+    json(res, 200, await vms.snapshotDelete(ctx.params.id, ctx.params.tag));
+  }));
+
+  // ---- console ----
+  r.get('/api/vms/:id/console', guard(async (req, res, ctx) => {
+    const vm = vms.find(ctx.params.id);
+    if (!vm) return json(res, 404, { error: 'VM nahi mila' });
+    await consoleStream(req, res, vm, { writable: true });
+  }));
+
+  r.post('/api/vms/:id/console', guard(async (req, res, ctx) => {
+    const vm = vms.find(ctx.params.id);
+    if (!vm) return json(res, 404, { error: 'VM nahi mila' });
+    return consoleInput(req, res, vm);
+  }));
+
+  // ---- images ----
+  r.get('/api/images', guard(async (req, res) => {
+    json(res, 200, images.list());
+  }));
+
+  r.post('/api/images/download', guard(async (req, res) => {
+    const b = await body(req);
+    const p = await images.download(b.id || b.url, { url: b.url, name: b.name, user: b.user });
+    json(res, 202, { ok: true, download: p });
+  }));
+
+  r.delete('/api/images/:id', guard(async (req, res, ctx) => {
+    json(res, 200, await images.remove(ctx.params.id));
+  }));
+
+  // raw upload: body = file bytes, ?name=file.iso
+  r.post('/api/images/upload', guard(async (req, res, ctx) => {
+    const name = ctx.params.name || new URL(req.url, 'http://x').searchParams.get('name') || 'upload.iso';
+    const img = await images.saveUpload(name, req);
+    json(res, 201, { image: img });
+  }));
+
+  // ---- misc ----
+  r.get('/api/images/progress', guard(async (req, res) => {
+    json(res, 200, { downloads: images.list().catalog });
+  }));
+
+  return r;
+}
+
+// ---------- console plumbing ----------
+async function consoleStream(req, res, vm, { writable }) {
+  const st = await qemu.status(vm);
+  if (!st.running) {
+    return json(res, 409, { error: 'VM band hai — pehle start karein' });
+  }
+  let bridge;
+  try {
+    bridge = await vms.consoleConnect(vm.id);
+  } catch (e) {
+    return json(res, 502, { error: `Serial console se connect nahi hua: ${e.message}` });
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no'
   });
-};
+  res.write(`event: hello\ndata: ${JSON.stringify({ id: vm.id, name: vm.name, writable })}\n\n`);
+  const snap = bridge.snapshot();
+  if (snap) res.write(`data: ${JSON.stringify({ out: snap })}\n\n`);
+
+  const onData = (chunk) => {
+    if (res.writableEnded) return;
+    res.write(`data: ${JSON.stringify({ out: chunk })}\n\n`);
+  };
+  bridge.on('data', onData);
+  const hb = setInterval(() => {
+    if (!res.writableEnded) res.write(': ping\n\n');
+  }, 15000);
+
+  req.on('close', () => {
+    clearInterval(hb);
+    bridge.removeListener('data', onData);
+  });
+}
+
+async function consoleInput(req, res, vm) {
+  const b = await body(req, 64 * 1024);
+  const data = String(b.data || '');
+  if (!data) return json(res, 400, { error: 'data khali hai' });
+  const bridge = vms.consoleBridge(vm.id);
+  if (!bridge.connected) return json(res, 409, { error: 'Console disconnect hai' });
+  bridge.write(data);
+  json(res, 200, { ok: true });
+}
+
+module.exports = { build, json, fail, body };

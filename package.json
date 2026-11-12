@@ -1,24 +1,23 @@
 {
-  "name": "botdeck",
+  "name": "vpsdeck",
   "version": "1.0.0",
-  "private": true,
-  "description": "BotDeck — Docker-free bot hosting panel that runs directly on any VPS",
+  "description": "VPSDeck - Docker ke bina, apne VPS ke andar multiple QEMU virtual machines banane ka panel",
   "main": "server.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node server.js",
+    "test": "node tests/iso-test.js && node tests/lifecycle-test.js && node tests/ui-smoke.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18"
   },
   "keywords": [
-    "bot",
-    "hosting",
-    "panel",
     "vps",
-    "process-manager",
-    "no-docker"
+    "kvm",
+    "qemu",
+    "panel",
+    "virtualization"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {}
 }

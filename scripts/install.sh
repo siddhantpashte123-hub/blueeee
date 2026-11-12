@@ -1,246 +1,257 @@
 #!/usr/bin/env bash
 #
-# BotDeck installer — no Docker required.
+# VPSDeck installer — kisi bhi Ubuntu/Debian VPS par (Docker ki zaroorat nahi).
 #
-# From a cloned repository:
-#   sudo bash scripts/install.sh
+#   curl -fsSL <url>/scripts/install.sh | sudo bash
 #
-# One-liner (downloads the source automatically):
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/<branch>/scripts/install.sh | sudo bash
-#
-# Optional environment variables:
-#   APP_DIR=/opt/botdeck      installation folder
-#   PORT=3000                 panel port
-#   SERVICE_USER=botdeck      linux user that runs the panel + bots
-#   NODE_MAJOR=22             Node.js version installed when none is present
-#   NO_SYSTEMD=1              only copy files, don't install the service
-#   BOTDECK_REPO=owner/repo   GitHub repository used by the one-liner
-#   BOTDECK_REF=branch        git ref (branch/tag/sha) used by the one-liner
+# Env vars (optional):
+#   APP_DIR=/opt/vpsdeck      install folder
+#   PORT=8080                 panel port (auto free port agar busy ho)
+#   SERVICE_USER=vpsdeck      panel chalane wala linux user
+#   NO_SYSTEMD=1              systemd ko ignore karke standalone mode
+#   SKIP_QEMU=1               qemu install skip (pehle se installed ho to)
+#   BOTDECK_REPO / VPSDECK_REPO   github repo (archive fetch ke liye)
+#   VPSDECK_REF=<sha|tag>     kaunsa version install karna hai
 #
 set -euo pipefail
 
-INSTALLER_VERSION="2.1"
+APP_DIR="${APP_DIR:-/opt/vpsdeck}"
+PORT="${PORT:-8080}"
+SERVICE_USER="${SERVICE_USER:-vpsdeck}"
+SERVICE_NAME="vpsdeck"
+REPO="${VPSDECK_REPO:-${BOTDECK_REPO:-siddhantpashte123-hub/blueeee}}"
+REF="${VPSDECK_REF:-main}"
+NO_SYSTEMD="${NO_SYSTEMD:-0}"
+SKIP_QEMU="${SKIP_QEMU:-0}"
 
-APP_DIR="${APP_DIR:-/opt/botdeck}"
-PORT_EXPLICIT=0
-if [ -n "${PORT:-}" ]; then PORT_EXPLICIT=1; fi
-PORT="${PORT:-3000}"
-SERVICE_NAME="botdeck"
-SERVICE_USER="${SERVICE_USER:-botdeck}"
-NODE_MAJOR="${NODE_MAJOR:-22}"
+C_OK="\033[32m"; C_WARN="\033[33m"; C_ERR="\033[31m"; C_DIM="\033[2m"; C_B="\033[1m"; C_0="\033[0m"
+say()  { printf "  %b\n" "$*"; }
+ok()   { printf "  ${C_OK}✓${C_0} %b\n" "$*"; }
+warn() { printf "  ${C_WARN}!${C_0} %b\n" "$*"; }
+die()  { printf "  ${C_ERR}✗ %b${C_0}\n" "$*"; exit 1; }
+step() { printf "\n${C_B}%s${C_0}\n" "$*"; }
 
-REPO="${BOTDECK_REPO:-siddhantpashte123-hub/blueeee}"
-SOURCE_REF="${BOTDECK_REF:-}"
-FALLBACK_REFS=("main" "arena/ac969ea0-blueeee")
+[ "$(id -u)" = "0" ] || die "Root se chalayein: sudo bash install.sh"
 
-# When the script is piped into bash there is no checkout next to it, so the
-# source is downloaded from GitHub instead.
-SELF="${BASH_SOURCE[0]:-}"
-SRC_DIR=""
-if [ -n "$SELF" ] && [ -f "$SELF" ]; then
-  CANDIDATE="$(cd "$(dirname "$SELF")/.." 2>/dev/null && pwd || true)"
-  if [ -n "$CANDIDATE" ] && [ -f "$CANDIDATE/server.js" ]; then
-    SRC_DIR="$CANDIDATE"
-  fi
-fi
+printf "\n${C_B}  VPSDeck installer${C_0}\n"
+say "${C_DIM}apne VPS ke andar VPS — bina Docker${C_0}"
 
-TMP_ROOT=""
-cleanup() {
-  if [ -n "$TMP_ROOT" ] && [ -d "$TMP_ROOT" ]; then rm -rf "$TMP_ROOT"; fi
-}
-trap cleanup EXIT
-
-bold() { printf '\033[1m%s\033[0m\n' "$*"; }
-info() { printf '  \033[36m→\033[0m %s\n' "$*"; }
-ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
-warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
-die()  { printf '  \033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
-
-[ "$(id -u)" -eq 0 ] || die "Please run as root:  sudo bash scripts/install.sh"
-
-bold ""
-bold "  BotDeck installer v${INSTALLER_VERSION} — Docker-free bot hosting panel"
-bold "  =================================================="
-echo
-
-# ----------------------------------------------------------------- source ---
-fetch_tarball() {
-  local ref="$1" dest="$2"
-  if command -v curl >/dev/null 2>&1; then
-    # branch/tag name, then a raw commit sha, then the API as last resort
-    curl -fsSL --connect-timeout 15 --max-time 180 \
-      "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${ref}" -o "$dest" 2>/dev/null && return 0
-    curl -fsSL --connect-timeout 15 --max-time 180 \
-      "https://codeload.github.com/${REPO}/tar.gz/${ref}" -o "$dest" 2>/dev/null && return 0
-    curl -fsSL --connect-timeout 15 --max-time 180 \
-      -H 'Accept: application/vnd.github+json' \
-      "https://api.github.com/repos/${REPO}/tarball/${ref}" -o "$dest" 2>/dev/null && return 0
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -T 30 -O "$dest" "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${ref}" 2>/dev/null && return 0
-    wget -q -T 30 -O "$dest" "https://codeload.github.com/${REPO}/tar.gz/${ref}" 2>/dev/null && return 0
-    wget -q -T 30 -O "$dest" "https://api.github.com/repos/${REPO}/tarball/${ref}" 2>/dev/null && return 0
-  fi
-  return 1
-}
-
-download_source() {
-  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-    die "curl or wget is required to download the source"
-  fi
-
-  local refs=()
-  if [ -n "$SOURCE_REF" ]; then refs+=("$SOURCE_REF"); fi
-  refs+=("${FALLBACK_REFS[@]}")
-
-  TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/botdeck-src.XXXXXX")"
-  info "Downloading BotDeck from github.com/${REPO}"
-
-  local ref archive dir
-  for ref in "${refs[@]}"; do
-    archive="$TMP_ROOT/botdeck.tar.gz"
-    rm -rf "$TMP_ROOT/extract"
-    mkdir -p "$TMP_ROOT/extract"
-    if fetch_tarball "$ref" "$archive" && tar -xzf "$archive" -C "$TMP_ROOT/extract" 2>/dev/null; then
-      dir="$(find "$TMP_ROOT/extract" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-      if [ -n "$dir" ] && [ -f "$dir/server.js" ]; then
-        SRC_DIR="$dir"
-        ok "Source downloaded (${ref})"
-        return 0
-      fi
-    fi
-    warn "ref '${ref}' is not usable — trying the next one"
-  done
-
-  die "Could not download BotDeck. Check BOTDECK_REPO / BOTDECK_REF, or clone the repo and run: sudo bash scripts/install.sh"
-}
-
-if [ -z "$SRC_DIR" ]; then
-  download_source
-else
-  ok "Using local source: ${SRC_DIR}"
-fi
-
-# ------------------------------------------------------------------ node ---
-NODE_BIN="$(command -v node || true)"
-if [ -n "$NODE_BIN" ] && "$NODE_BIN" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)' 2>/dev/null; then
-  ok "Node.js $("$NODE_BIN" -v) found"
-else
-  info "Node.js 18+ not found — installing Node.js ${NODE_MAJOR}.x"
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq
-    apt-get install -y -qq ca-certificates curl gnupg >/dev/null
-    if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/nodesource_setup.sh; then
-      bash /tmp/nodesource_setup.sh >/dev/null 2>&1
-      apt-get install -y -qq nodejs >/dev/null
-    else
-      warn "NodeSource script unavailable, trying the distribution package"
-      apt-get install -y -qq nodejs npm >/dev/null
-    fi
-  elif command -v dnf >/dev/null 2>&1; then
-    curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MAJOR}.x" | bash - >/dev/null 2>&1
-    dnf install -y -q nodejs >/dev/null
-  elif command -v yum >/dev/null 2>&1; then
-    curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MAJOR}.x" | bash - >/dev/null 2>&1
-    yum install -y -q nodejs >/dev/null
-  else
-    die "Unsupported distribution. Install Node.js 18+ manually and re-run."
-  fi
-  NODE_BIN="$(command -v node || true)"
-  [ -n "$NODE_BIN" ] || die "Node.js installation failed."
-  ok "Node.js $("$NODE_BIN" -v) installed"
-fi
-NODE_PATH_BIN="$(command -v node)"
-
-# --------------------------------------------------------------- helpers ---
-for bin in unzip tar; do
-  if ! command -v "$bin" >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-      apt-get install -y -qq "$bin" >/dev/null 2>&1 || warn "could not install $bin (archive extraction may be limited)"
-    else
-      warn "$bin not found — archive extraction may be limited"
-    fi
-  fi
-done
-command -v python3 >/dev/null 2>&1 || warn "python3 not found — Python bots will not start until it is installed"
-
-# ------------------------------------------------------------------ user ---
-if id "$SERVICE_USER" >/dev/null 2>&1; then
-  ok "Service user '${SERVICE_USER}' exists"
-else
-  info "Creating system user '${SERVICE_USER}'"
-  useradd --system --create-home --home-dir "/var/lib/${SERVICE_NAME}" --shell /bin/bash "$SERVICE_USER"
-  ok "User '${SERVICE_USER}' created"
-fi
-
-# ------------------------------------------------------------------ copy ---
-info "Installing panel to ${APP_DIR}"
-mkdir -p "$APP_DIR"
-if [ "$SRC_DIR" != "$APP_DIR" ]; then
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete \
-      --exclude '.git' --exclude 'node_modules' --exclude 'data' --exclude 'bots' \
-      --exclude '*.log' "$SRC_DIR/" "$APP_DIR/"
-  else
-    # No rsync: copy with tar, never touching data/ or bots/ (live bot files and
-    # the panel database must survive an upgrade).
-    find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name data ! -name bots -exec rm -rf {} +
-    tar -C "$SRC_DIR" \
-      --exclude='./.git' --exclude='./node_modules' --exclude='./data' \
-      --exclude='./bots' --exclude='*.log' \
-      -cf - . | tar -C "$APP_DIR" -xf -
-  fi
-fi
-mkdir -p "$APP_DIR/data/logs" "$APP_DIR/bots"
-chown -R "${SERVICE_USER}:${SERVICE_USER}" "$APP_DIR"
-chmod 750 "$APP_DIR/data"
-ok "Files installed"
-
-# ---------------------------------------------------------------- ports ---
+# ---------------------------------------------------------------- port helper
 port_free() {
   local p="$1"
-  [ -n "$p" ] || return 1
-  if [ -n "${NODE_PATH_BIN:-}" ] && [ -x "${NODE_PATH_BIN:-}" ]; then
-    "$NODE_PATH_BIN" -e '
-      const net = require("net");
-      const port = Number(process.argv[1]);
-      const server = net.createServer();
-      server.once("error", () => process.exit(1));
-      server.once("listening", () => server.close(() => process.exit(0)));
-      server.listen(port, "0.0.0.0");
-    ' "$p" >/dev/null 2>&1
-    return $?
-  fi
-  if command -v ss >/dev/null 2>&1; then
-    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"; then return 1; fi
-  fi
-  return 0
+  node -e "
+    const net=require('net');const s=net.createServer();
+    s.once('error',()=>process.exit(1));
+    s.once('listening',()=>s.close(()=>process.exit(0)));
+    s.listen($p,'0.0.0.0');
+  " 2>/dev/null
 }
 
 pick_free_port() {
   local p="$1" i=0
-  while [ "$i" -lt 60 ]; do
+  while [ $i -lt 60 ]; do
     if port_free "$p"; then echo "$p"; return 0; fi
-    p=$((p + 1))
-    i=$((i + 1))
+    p=$((p + 1)); i=$((i + 1))
   done
   return 1
 }
 
-# --------------------------------------------------------------- service ---
-# systemd is great when it exists, but plenty of VPS/containers don't have it.
-# In that case BotDeck installs a tiny `botdeck` control script + cron autostart.
-SYSTEMD_OK=0
-if [ "${NO_SYSTEMD:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
-  if systemctl show-environment >/dev/null 2>&1; then
-    SYSTEMD_OK=1
+# ------------------------------------------------------------------ 1. basics
+step "1/7  System check"
+command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq curl >/dev/null; }
+ok "root, curl available"
+
+if command -v node >/dev/null; then
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+  if [ "$NODE_MAJOR" -lt 18 ]; then
+    NODE_MAJOR=0
+  fi
+else
+  NODE_MAJOR=0
+fi
+
+if [ "$NODE_MAJOR" -lt 18 ]; then
+  warn "Node.js 18+ nahi mila — install kar raha hoon (NodeSource)"
+  if command -v apt-get >/dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1 || true
+    apt-get install -y -qq nodejs >/dev/null 2>&1 || true
+  fi
+  command -v node >/dev/null || die "Node.js install nahi hua. Manually: https://nodejs.org/"
+  ok "Node.js $(node -v) install ho gaya"
+else
+  ok "Node.js $(node -v)"
+fi
+
+# ------------------------------------------------------------------- 2. qemu
+step "2/7  QEMU (virtualization engine)"
+if [ "$SKIP_QEMU" = "1" ]; then
+  if command -v qemu-system-x86_64 >/dev/null; then
+    ok "QEMU pehle se hai ($(qemu-system-x86_64 --version | head -1))"
+  else
+    warn "SKIP_QEMU=1 — QEMU install skip kiya (VM start nahi honge jab tak install na ho)"
+  fi
+elif command -v qemu-system-x86_64 >/dev/null && command -v qemu-img >/dev/null; then
+  ok "QEMU pehle se hai ($(qemu-system-x86_64 --version | head -1))"
+else
+  if command -v apt-get >/dev/null; then
+    say "apt se qemu install ho raha hai (2-3 minute)..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq || true
+    if ! apt-get install -y -qq qemu-system-x86 qemu-utils >/dev/null 2>&1; then
+      warn "qemu-system-x86 install fail — dobara try: sudo apt install -y qemu-system-x86 qemu-utils"
+    fi
+  else
+    warn "apt-get nahi mila — QEMU manually install karein"
+  fi
+  if command -v qemu-system-x86_64 >/dev/null; then
+    ok "QEMU install ho gaya ($(qemu-system-x86_64 --version | head -1))"
+  else
+    warn "QEMU missing — panel chalega par VM start nahi hoga"
   fi
 fi
 
-install_systemd_service() {
-  info "Creating systemd service '${SERVICE_NAME}'"
-  cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
+# KVM check
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+  ok "/dev/kvm mila — VMs hardware speed par chalenge"
+  KVM_OK=1
+else
+  warn "/dev/kvm nahi mila — VMs software mode (TCG) me chalenge, slow honge"
+  say "${C_DIM}Hosting provider se nested virtualization enable karwa sakte hain.${C_0}"
+  KVM_OK=0
+fi
+
+# ------------------------------------------------------------------ 3. systemd
+step "3/7  Service mode"
+SYSTEMD=0
+if [ "$NO_SYSTEMD" != "1" ] && command -v systemctl >/dev/null 2>&1 && systemctl show-environment >/dev/null 2>&1; then
+  SYSTEMD=1
+  ok "systemd available — service banega ($SERVICE_NAME.service)"
+else
+  ok "systemd nahi hai — standalone mode (vpsdeck start/stop)"
+fi
+
+# ------------------------------------------------------------------ 4. source
+step "4/7  Files copy"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+SRC_DIR=""
+if [ -f "$(dirname "$0")/../server.js" ]; then
+  SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+  ok "local folder se install: $SRC_DIR"
+else
+  say "GitHub se archive la raha hoon ($REPO @ $REF)..."
+  URL="https://codeload.github.com/${REPO}/tar.gz/${REF}"
+  if ! curl -fsSL "$URL" -o "$TMP/src.tar.gz"; then
+    URL="https://codeload.github.com/${REPO}/tar.gz/refs/heads/main"
+    curl -fsSL "$URL" -o "$TMP/src.tar.gz" || die "Download fail: $URL"
+  fi
+  tar -xzf "$TMP/src.tar.gz" -C "$TMP"
+  SRC_DIR="$(find "$TMP" -maxdepth 1 -type d -name 'blueeee-*' | head -1)"
+  [ -n "$SRC_DIR" ] || SRC_DIR="$(find "$TMP" -maxdepth 1 -mindepth 1 -type d | head -1)"
+  ok "source mil gaya"
+fi
+
+# user
+if id "$SERVICE_USER" >/dev/null 2>&1; then
+  ok "user '$SERVICE_USER' pehle se hai"
+else
+  useradd --system --create-home --shell /bin/bash "$SERVICE_USER" 2>/dev/null || \
+    useradd -r -m -s /bin/bash "$SERVICE_USER"
+  ok "user '$SERVICE_USER' bana"
+fi
+if getent group kvm >/dev/null 2>&1; then
+  usermod -aG kvm "$SERVICE_USER" 2>/dev/null || true
+  ok "'$SERVICE_USER' ko kvm group me daala"
+fi
+
+# purana panel band karo (naya port bind ho sake)
+if [ -x /usr/local/bin/$SERVICE_NAME ]; then
+  /usr/local/bin/$SERVICE_NAME stop >/dev/null 2>&1 || true
+fi
+if [ -f "$APP_DIR/data/panel.pid" ]; then
+  OLDPID="$(cat "$APP_DIR/data/panel.pid" 2>/dev/null || true)"
+  if [ -n "${OLDPID:-}" ] && kill -0 "$OLDPID" 2>/dev/null; then
+    kill "$OLDPID" 2>/dev/null || true
+    sleep 1
+  fi
+fi
+if [ "$SYSTEMD" = "1" ] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+fi
+
+# leftover qemu panels of THIS app dir
+stop_old_panels() {
+  local pid exe cmd
+  for pid in $(pgrep -f "${APP_DIR}/server.js" 2>/dev/null || true); do
+    [ "$pid" = "$$" ] && continue
+    exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    case "$exe" in
+      *node*) ;;
+      *) continue ;;
+    esac
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    case "$cmd" in
+      *install.sh*) continue ;;
+    esac
+    kill "$pid" 2>/dev/null || true
+  done
+}
+stop_old_panels
+
+mkdir -p "$APP_DIR"
+PAUSED=0
+if [ -f "$APP_DIR/data/panel.pid" ]; then
+  P="$(cat "$APP_DIR/data/panel.pid" 2>/dev/null || true)"
+  if [ -n "${P:-}" ] && kill -0 "$P" 2>/dev/null; then
+    kill "$P" 2>/dev/null || true; sleep 1
+  fi
+fi
+
+# data/ aur bots/ ko chhod ke copy (upgrade safe)
+tar -C "$SRC_DIR" \
+  --exclude='./.git' --exclude='./data' --exclude='./node_modules' \
+  --exclude='./*.log' --exclude='./.arena' \
+  -cf - . | tar -C "$APP_DIR" -xf -
+ok "code $APP_DIR me copy ho gaya (data safe raha)"
+
+mkdir -p "$APP_DIR/data/vms" "$APP_DIR/data/images" "$APP_DIR/data/logs"
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR" 2>/dev/null || true
+chmod 750 "$APP_DIR/data" 2>/dev/null || true
+
+# ------------------------------------------------------------------- 5. port
+step "5/7  Panel port"
+PORT_FROM_FILE=""
+if [ -f "$APP_DIR/data/port" ]; then
+  PORT_FROM_FILE="$(cat "$APP_DIR/data/port" 2>/dev/null | tr -dc '0-9' || true)"
+fi
+PORT_EXPLICIT=0
+[ -n "${PORT_OVERRIDE:-}" ] && PORT_EXPLICIT=1
+# agar user ne PORT env diya hai to wo jeetta hai, warna pehle saved port
+if [ -n "${PORT:-}" ] && [ "${PORT}" != "8080" ]; then
+  PORT_EXPLICIT=1
+elif [ -n "$PORT_FROM_FILE" ]; then
+  PORT="$PORT_FROM_FILE"
+fi
+
+if port_free "$PORT"; then
+  ok "port $PORT free hai"
+else
+  warn "port $PORT busy hai — agla free port dhoondh raha hoon"
+  NEWPORT="$(pick_free_port "$((PORT + 1))" || true)"
+  [ -n "$NEWPORT" ] || die "Koi free port nahi mila. PORT=9000 jaisa koi port dein."
+  PORT="$NEWPORT"
+  ok "port $PORT use hoga"
+fi
+echo "$PORT" > "$APP_DIR/data/port"
+chown "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR/data/port" 2>/dev/null || true
+
+# --------------------------------------------------------------- 6. service
+step "6/7  Service setup"
+if [ "$SYSTEMD" = "1" ]; then
+  cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<UNIT
 [Unit]
-Description=BotDeck bot hosting panel (Docker-free)
+Description=VPSDeck — QEMU based VPS panel
 After=network-online.target
 Wants=network-online.target
 
@@ -251,206 +262,88 @@ Group=${SERVICE_USER}
 WorkingDirectory=${APP_DIR}
 Environment=NODE_ENV=production
 Environment=PORT=${PORT}
-Environment=HOST=0.0.0.0
-Environment=DATA_DIR=${APP_DIR}/data
-Environment=BOTS_DIR=${APP_DIR}/bots
-ExecStart=${NODE_PATH_BIN} ${APP_DIR}/server.js
+Environment=APP_DIR=${APP_DIR}
+ExecStart=$(command -v node) ${APP_DIR}/server.js
 Restart=always
-RestartSec=3
-# Only the panel gets SIGTERM; it stops every bot gracefully itself.
-KillMode=mixed
-TimeoutStopSec=25
+RestartSec=5
+# QEMU VMs ko panel ke band hone se bachaye rakhein
+KillMode=process
 LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
+UNIT
   systemctl daemon-reload
   systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl restart "$SERVICE_NAME"
-  sleep 1.5
-
+  sleep 2
   if systemctl is-active --quiet "$SERVICE_NAME"; then
-    ok "Service is running"
+    ok "systemd service chalu hai"
   else
-    warn "Service failed to start — check: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+    warn "service start nahi hui — 'journalctl -u $SERVICE_NAME -n 50' dekhein"
   fi
-}
-
-install_standalone() {
-  local cli="/usr/local/bin/${SERVICE_NAME}"
-
-  info "systemd not detected — using standalone process control"
-  [ -f "${APP_DIR}/scripts/service.sh" ] || die "scripts/service.sh is missing from the installation"
-
-  sed -e "s|__APP_DIR__|${APP_DIR}|g" \
-      -e "s|__NODE_BIN__|${NODE_PATH_BIN}|g" \
-      -e "s|__PORT__|${PORT}|g" \
-      -e "s|__SERVICE_USER__|${SERVICE_USER}|g" \
-      -e "s|__SERVICE_NAME__|${SERVICE_NAME}|g" \
-      "${APP_DIR}/scripts/service.sh" > "$cli"
-  chmod 755 "$cli"
-  ok "Control script installed: ${cli}"
-
-  "$cli" stop >/dev/null 2>&1 || true
-  if "$cli" start; then
-    ok "Panel started"
-  else
-    warn "Panel did not start — check: ${SERVICE_NAME} logs"
-  fi
-
-  # Best-effort autostart without systemd.
-  local start_cron="su -s /bin/bash ${SERVICE_USER} -c '${cli} start' >/dev/null 2>&1"
-  if [ -d /etc/cron.d ]; then
-    cat > "/etc/cron.d/${SERVICE_NAME}" <<EOF
-# Start BotDeck at boot (no systemd on this host)
-@reboot root ${start_cron}
-EOF
-    chmod 644 "/etc/cron.d/${SERVICE_NAME}"
-    ok "Autostart entry added: /etc/cron.d/${SERVICE_NAME} (needs a running cron daemon)"
-  elif command -v crontab >/dev/null 2>&1; then
-    ( crontab -l 2>/dev/null | grep -Fv "${cli} start"; echo "@reboot ${start_cron}" ) | crontab - || true
-    ok "Autostart entry added to the root crontab (needs a running cron daemon)"
-  else
-    warn "No cron found — BotDeck will not start automatically after a reboot"
-  fi
-}
-
-# Stop the previous BotDeck of this installation so its port is released.
-if [ "$SYSTEMD_OK" = "1" ] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-  info "Stopping the existing BotDeck service before upgrading"
-  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-fi
-
-if [ -f "${APP_DIR}/data/panel.pid" ]; then
-  OLD_PID="$(cat "${APP_DIR}/data/panel.pid" 2>/dev/null || true)"
-  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    info "Stopping the previously running panel (pid ${OLD_PID})"
-    kill -TERM "$OLD_PID" 2>/dev/null || true
-    for _ in $(seq 1 20); do
-      kill -0 "$OLD_PID" 2>/dev/null || break
-      sleep 0.5
-    done
-    kill -KILL "$OLD_PID" 2>/dev/null || true
-  fi
-  rm -f "${APP_DIR}/data/panel.pid"
-fi
-
-# A port saved by `botdeck port <n>` survives upgrades unless PORT was passed.
-if [ -f "${APP_DIR}/data/port" ]; then
-  SAVED_PORT="$(cat "${APP_DIR}/data/port" 2>/dev/null || true)"
-  if [ "$PORT_EXPLICIT" = "1" ]; then
-    info "Clearing previously saved port ${SAVED_PORT} — using PORT=${PORT}"
-    rm -f "${APP_DIR}/data/port"
-  else
-    case "$SAVED_PORT" in
-      ''|*[!0-9]*) ;;
-      *)
-        PORT="$SAVED_PORT"
-        info "Using the port previously set with 'botdeck port': ${PORT}"
-        ;;
-    esac
-  fi
-fi
-
-# Stop any BotDeck process still running from this folder (older installs can
-# leave one behind with a different pid file / port).
-stop_all_panels() {
-  local pattern="${APP_DIR}/server.js" pids pid cmd exe filtered=""
-  command -v pgrep >/dev/null 2>&1 || return 0
-  pids="$(pgrep -f -- "$pattern" 2>/dev/null || true)"
-  [ -n "$pids" ] || return 0
-
-  for pid in $pids; do
-    # never touch ourselves / our parent shell
-    if [ "$pid" = "$$" ] || [ "$pid" = "${PPID:-0}" ] || [ "$pid" = "${BASHPID:-$$}" ]; then
-      continue
-    fi
-    cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
-    case "$cmd" in
-      *install.sh*) continue ;;
-    esac
-    exe="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
-    case "$exe" in
-      *node*) filtered="$filtered $pid" ;;
-    esac
-  done
-
-  [ -n "$filtered" ] || return 0
-  info "Stopping running BotDeck process(es):${filtered}"
-  # shellcheck disable=SC2086
-  kill -TERM $filtered 2>/dev/null || true
-  for _ in $(seq 1 20); do
-    local alive=""
-    for pid in $filtered; do
-      kill -0 "$pid" 2>/dev/null && alive="yes"
-    done
-    [ -z "$alive" ] && break
-    sleep 0.5
-  done
-  # shellcheck disable=SC2086
-  kill -KILL $filtered 2>/dev/null || true
-  sleep 0.3
-}
-
-stop_all_panels
-
-# Port in use? Move to the next free one instead of failing the install.
-if ! port_free "$PORT"; then
-  info "Port ${PORT} is already in use by another program"
-  if NEW_PORT="$(pick_free_port $((PORT + 1)))"; then
-    warn "Using port ${NEW_PORT} for BotDeck instead (change later with: botdeck port <n>)"
-    PORT="$NEW_PORT"
-  else
-    die "Port ${PORT} is taken and no free port was found nearby. Re-run with PORT=<free port>."
-  fi
-fi
-
-if [ "$SYSTEMD_OK" = "1" ]; then
-  install_systemd_service
 else
-  install_standalone
+  # standalone control script
+  install -d -m 755 /usr/local/bin
+  cat > "/usr/local/bin/${SERVICE_NAME}" <<SVC
+#!/usr/bin/env bash
+# VPSDeck control script (systemd ke bina)
+APP_DIR="${APP_DIR}"
+NODE_BIN="$(command -v node)"
+SERVICE_USER="${SERVICE_USER}"
+DEFAULT_PORT="${PORT}"
+PID_FILE="\$APP_DIR/data/panel.pid"
+LOG_FILE="\$APP_DIR/data/panel.log"
+PORT_FILE="\$APP_DIR/data/port"
+SVC
+  # baaki script file se jode
+  sed -e '/^#!/d' -e '/^#/d' "$SRC_DIR/scripts/service.sh" >> "/usr/local/bin/${SERVICE_NAME}"
+  chmod 755 "/usr/local/bin/${SERVICE_NAME}"
+  /usr/local/bin/${SERVICE_NAME} start >/dev/null 2>&1 || true
+  sleep 2
+  if /usr/local/bin/${SERVICE_NAME} status >/dev/null 2>&1; then
+    ok "standalone panel chalu hai (vpsdeck status)"
+  else
+    warn "panel start nahi hua — 'vpsdeck logs' dekhein"
+  fi
+
+  # reboot par khud start
+  mkdir -p /etc/cron.d
+  echo "@reboot root /usr/local/bin/${SERVICE_NAME} start >/dev/null 2>&1" > /etc/cron.d/${SERVICE_NAME}
+  chmod 644 /etc/cron.d/${SERVICE_NAME}
+  ok "reboot autostart set (/etc/cron.d/${SERVICE_NAME})"
 fi
 
-# --------------------------------------------------------------- network ---
+# firewall
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  info "ufw is active — opening port ${PORT}"
-  ufw allow "${PORT}/tcp" >/dev/null 2>&1 || warn "could not update ufw rules"
+  ufw allow "$PORT"/tcp >/dev/null 2>&1 || true
+  ok "ufw me port $PORT allow kiya"
+fi
+
+# ----------------------------------------------------------------- 7. verify
+step "7/7  Health check"
+HEALTH=""
+for i in $(seq 1 25); do
+  HEALTH="$(curl -fsS "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)"
+  [ -n "$HEALTH" ] && break
+  sleep 1
+done
+if [ -n "$HEALTH" ]; then
+  ok "panel live hai: $HEALTH"
+else
+  warn "health check fail — 'vpsdeck logs' (standalone) ya 'journalctl -u $SERVICE_NAME' dekhein"
 fi
 
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-[ -n "$IP" ] || IP="<your-server-ip>"
-
-bold ""
-bold "  ────────────────────────────────────────────────"
-bold "   BotDeck is installed 🎉"
-bold "  ────────────────────────────────────────────────"
-echo
-echo "   Panel URL : http://${IP}:${PORT}"
-echo "   Port      : ${PORT}"
-echo "   App dir   : ${APP_DIR}"
-echo "   Data      : ${APP_DIR}/data"
-echo "   Bots      : ${APP_DIR}/bots"
-echo
-echo "   Open the URL in your browser and create the admin password."
-echo
-if [ "$SYSTEMD_OK" = "1" ]; then
-  echo "   Useful commands:"
-  echo "     systemctl status ${SERVICE_NAME}"
-  echo "     systemctl restart ${SERVICE_NAME}"
-  echo "     journalctl -u ${SERVICE_NAME} -f"
-else
-  echo "   Useful commands (no systemd):"
-  echo "     ${SERVICE_NAME} status"
-  echo "     ${SERVICE_NAME} restart"
-  echo "     ${SERVICE_NAME} logs"
-  echo "     tail -f ${APP_DIR}/data/panel.log"
-fi
-echo
-if [ "${PORT}" = "80" ] || [ "${PORT}" = "443" ]; then
-  echo "   Port ${PORT} is privileged — make sure the firewall allows it."
-  echo
-fi
-echo "   Tip: put Nginx/Caddy in front for HTTPS and a nice domain."
-echo
+printf "\n${C_B}  Ho gaya! 🎉${C_0}\n\n"
+printf "  ${C_B}Panel URL :${C_0}  http://%s:%s\n" "${IP:-<server-ip>}" "$PORT"
+printf "  ${C_B}Local URL :${C_0}  http://localhost:%s\n" "$PORT"
+printf "  ${C_B}App dir   :${C_0}  %s\n" "$APP_DIR"
+printf "  ${C_B}Port      :${C_0}  %s\n" "$PORT"
+printf "  ${C_B}Accel     :${C_0}  %s\n" "$([ "$KVM_OK" = "1" ] && echo 'KVM (fast)' || echo 'TCG (software — slow)')"
+printf "\n  ${C_B}Pehle kya karein:${C_0}\n"
+printf "   1. Browser me panel kholein aur admin password set karein\n"
+printf "   2. 'OS Images' page me Ubuntu/Alpine image download karein\n"
+printf "   3. '+ Naya VPS' dabayein — 30 second me VM ban jayega\n"
+printf "\n  ${C_B}Commands:${C_0}  vpsdeck start | stop | restart | status | logs | port <n>\n"
+printf "  ${C_B}Public access nahi hai?${C_0} ssh -p 443 -R0:localhost:%s a.pinggy.io\n\n" "$PORT"

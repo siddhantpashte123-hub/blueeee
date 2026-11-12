@@ -1,516 +1,348 @@
-# BotDeck
+# VPSDeck 🖥️
 
-**Docker-free bot hosting panel for any VPS.**  
-Run unlimited bots as plain Linux processes — no Docker, no containers, no Kubernetes, no npm dependencies.
+**Apne ek VPS ke andar, jitne chahein VPS.** Docker ke bina, Kubernetes ke bina — sirf QEMU + ek Node.js panel.
 
-BotDeck is a single Node.js app with a web UI that lets you create, start, stop, restart and monitor as many bots as your VPS can hold. Each bot gets its own folder, environment variables, live console, log file, file manager, resource stats, crash auto-restart and an optional memory limit.
+VPSDeck ek chhota par poora control panel hai jo aapke VPS par **real virtual machines (KVM/QEMU)** banata hai: har VM ka apna disk, apna RAM/CPU, apna Linux user, apna SSH, aur browser me **live console**. QEMU VMs VPS ke andar normal processes ki tarah chalte hain, isliye na Docker chahiye, na special hosting.
 
 ```
-One Node.js process  →  supervises N bot processes  →  manageable from one panel
+┌──────────────────────────────────────────────────────────┐
+│  Aapka VPS (Ubuntu 22.04)                                │
+│                                                          │
+│   VPSDeck panel  :8080  ← browser me dashboard           │
+│      ├── VM 1  (Ubuntu 24.04, 1 vCPU, 1GB)  disk.qcow2   │
+│      ├── VM 2  (Alpine,      1 vCPU, 512MB) disk.qcow2   │
+│      └── VM 3  (Ubuntu 22.04, 2 vCPU, 2GB)  disk.qcow2   │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Hinglish quick start (2 minute)
+## Pehle sach: "unlimited VPS" ka matlab
 
-Aapke VPS pe Docker support nahi hai? Koi problem nahi — BotDeck bina Docker ke chalta hai. Har bot ek normal Linux process hota hai, panel usko start/stop/restart karta hai aur logs/console/files sab web UI se manage hote hain.
+Aap "unlimited VPS" bana sakte hain **jitna aapka VPS allow kare** — unlimited ka koi jaadu nahi hai. Har VM ko CPU, RAM aur disk chahiye:
 
-```bash
-# 1. VPS pe repo clone karo (ya files upload karo)
-git clone <your-repo-url> botdeck
-cd botdeck
+| Aapke VPS ki RAM | Kitne VMs (1GB wale) | Note |
+|---|---|---|
+| 2 GB | 1 | Panel khud bhi ~120 MB leta hai |
+| 4 GB | 2–3 | 3 chalenge par swap pe aa jayega |
+| 8 GB | 5–6 | Comfortable |
+| 16 GB | 10–12 | Achha |
+| 32 GB | 20+ | I/O bound ho jayega |
 
-# 2. Installer chalao (Node.js bhi khud install kar lega)
-sudo bash scripts/install.sh
+Aur ek **bahut zaroori baat** — speed:
 
-# 3. Browser me kholo → password banao → "New bot" → done
-http://YOUR_SERVER_IP:3000
-```
+| | Kab milta hai | Speed |
+|---|---|---|
+| **KVM** (hardware) | VPS provider ne *nested virtualization* ON kiya ho (`/dev/kvm` dikhe) | 100% — normal VPS jaisa |
+| **TCG** (software) | `/dev/kvm` nahi hai (zyadatar sasta VPS, aur wo VPS jo khud container/LXC me hai) | ~10–20% — boot 3–10 min, kaam chal jata hai par slow |
 
-Har bot ka apna folder hota hai: `/opt/botdeck/bots/<bot-id>/`.  
-Node.js, Python, Bash aur custom shell command — sab runtimes supported hain.
+Panel dono mode me kaam karta hai aur dashboard par saaf dikhata hai aap kaunse mode me ho. **TCG me Alpine Linux sabse best chalta hai** (60 MB image), Ubuntu heavy lagta hai.
 
----
-
-## Features
-
-| | |
-|---|---|
-| **No Docker** | Bots are supervised child processes with their own process group. Nothing else to install. |
-| **Unlimited bots** | Create as many as your RAM/CPU allows. Bulk start/stop, search, per-bot stats, one-click cloning of an existing bot (files + config). |
-| **Live console** | Server-Sent Events stream of stdout/stderr with ANSI colours, plus stdin input box. |
-| **Log files** | Every bot writes to `data/logs/<id>.log` (auto-rotated at 4 MB). Download or clear from the UI. |
-| **File manager** | Browse, upload (drag & drop), edit code in the browser, rename, delete, download, extract `.zip` / `.tar.gz`. |
-| **Process control** | Start, stop (SIGTERM → SIGKILL after 8s), restart, force kill. Whole process tree is cleaned up. |
-| **Crash recovery** | Auto-restart with exponential backoff (1s → 15s) and a max-attempt limit. |
-| **Memory guard** | Optional per-bot memory limit. Bot is stopped and flagged if it exceeds it — a lightweight `docker --memory` replacement. |
-| **Autostart** | Bots marked "start with panel" come back automatically after a server reboot. |
-| **Real metrics** | Per-bot CPU %, RSS memory and process count read from `/proc`, plus host CPU/RAM/disk/load. |
-| **Single admin** | Password auth (scrypt), session tokens, login rate limiting, CSRF-safe API. |
-| **Zero dependencies** | `package.json` has no npm packages. `git pull` + restart is the whole update process. |
+> Agar `/dev/kvm` nahi hai aur aapko bahut VMs chahiye — sasta raasta: usi panel me **Alpine + 512MB** wale VMs banao, ya provider se nested virtualization on karwao.
 
 ---
 
 ## Requirements
 
-- Linux VPS (systemd **or** no systemd — both work)
-- Node.js **18 or newer** (installer handles it)
-- ~100 MB RAM for the panel itself; plus whatever your bots use
-- Optional: `python3` for Python bots, `unzip`/`tar` for archive extraction
+- Ubuntu 20.04/22.04/24.04 ya Debian 11/12 (x86_64)
+- Node.js 18+ (installer khud install kar deta hai)
+- `qemu-system-x86` + `qemu-utils` (installer `apt` se laga deta hai)
+- Root access
+- Host me 64-bit virtualization feasible ho (KVM optional)
+- Internet (image download ke liye) — panel ko internet ki zaroorat nahi
 
-Works fine on a 1 vCPU / 1 GB RAM box for a handful of light bots.
+Docker / systemd **optional** — systemd na ho to panel standalone mode me chalta hai.
 
 ---
 
-## Install
-
-### One command
+## Install (1 command)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/siddhantpashte123-hub/blueeee/arena/ac969ea0-blueeee/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/siddhantpashte123-hub/blueeee/main/scripts/install.sh | sudo bash
 ```
 
-This downloads the latest source, installs Node.js if needed, creates the
-`botdeck` service user, copies the panel to `/opt/botdeck`, sets up startup
-(systemd service, or a `botdeck` control script + cron when systemd is missing)
-and starts it. Then open `http://YOUR_SERVER_IP:3000`.
+Kya karta hai:
+1. Node 18+ check/install
+2. `qemu-system-x86 qemu-utils` install
+3. `/dev/kvm` check aur accel mode batata hai
+4. System user `vpsdeck` banata hai (kvm group me daalta hai)
+5. Code `/opt/vpsdeck` me copy karta hai — **`data/` safe rehta hai** (upgrade par VMs nahi udte)
+6. systemd service **ya** standalone `vpsdeck` command + `/etc/cron.d/vpsdeck` autostart
+7. Panel port auto-pick karta hai (busy ho to agla free)
+8. Health check + summary print karta hai
 
-> Once this branch is merged into `main`, you can use the shorter `.../main/...` URL.
-
-### From a clone
+Options (env vars):
 
 ```bash
-git clone https://github.com/siddhantpashte123-hub/blueeee botdeck
-cd botdeck
-sudo bash scripts/install.sh
+curl -fsSL .../install.sh | sudo PORT=8080 APP_DIR=/opt/vpsdeck SERVICE_USER=vpsdeck bash
+# systemd-less host par force:
+sudo NO_SYSTEMD=1 bash scripts/install.sh
+# QEMU pehle se installed hai to apt skip:
+sudo SKIP_QEMU=1 bash scripts/install.sh
+# specific version:
+sudo VPSDECK_REF=<commit-sha> bash scripts/install.sh
 ```
 
-The installer:
-
-1. installs Node.js 18+ if missing (NodeSource → distro package fallback),
-2. creates a dedicated `botdeck` system user,
-3. copies the panel to `/opt/botdeck`,
-4. installs and starts a **systemd** service named `botdeck` — or, on hosts
-   without systemd, the `botdeck` control script plus a cron autostart entry,
-5. opens the port in `ufw` if the firewall is active.
-
-Options:
+Manual install:
 
 ```bash
-sudo APP_DIR=/srv/botdeck PORT=8080 SERVICE_USER=bots bash scripts/install.sh
-sudo NO_SYSTEMD=1 bash scripts/install.sh   # force the no-systemd standalone mode
-```
-
-If the requested port is already taken by something else, the installer picks
-the next free port automatically and prints it at the end (change it later with
-`botdeck port <n>` on no-systemd hosts, or by editing `Environment=PORT=` in the
-systemd unit).
-
-Then open `http://YOUR_SERVER_IP:3000` and create the admin password on first visit.
-
-### Servers without systemd (containers, OpenVZ/LXC, minimal images)
-
-Many cheap VPS hosts ship **no systemd** at all (`systemctl: command not found`).
-The installer detects that automatically and installs a small control script
-instead of the unit — nothing manual needed:
-
-```bash
-botdeck status        # running? which pid/port
-botdeck start
-botdeck restart
-botdeck stop
-botdeck logs          # tail -f /opt/botdeck/data/panel.log
-botdeck port 8090     # change port and restart automatically
-```
-
-In this mode the panel runs fully detached (own session, no controlling
-terminal), so closing SSH, pressing `Ctrl+C`, or logging out does **not** stop
-it — and your bots keep running.
-
-- panel log: `/opt/botdeck/data/panel.log`
-- autostart: cron `@reboot` entry in `/etc/cron.d/botdeck` (when cron exists)
-- neither systemd nor cron? Start the panel after a reboot with `botdeck start`
-
-### Manual (foreground)
-
-```bash
-cd botdeck
-PORT=3000 node server.js
-```
-
-Or with a process manager you already trust:
-
-```bash
-nohup node server.js > panel.log 2>&1 &
-```
-
-Keep it alive across reboots with `systemd`, `tmux`, or `screen` — BotDeck does not require any of them.
-
-### Docker? Not needed, but it also runs in one
-
-```bash
-docker run -d -p 3000:3000 -v botdeck-data:/app/data -v botdeck-bots:/app/bots node:22 \
-  sh -c "cd /app && node server.js"
+sudo apt update && sudo apt install -y qemu-system-x86 qemu-utils
+git clone <repo> vpsdeck && cd vpsdeck
+sudo PORT=8080 node server.js      # ya: PORT=8080 npm start
 ```
 
 ---
 
-## Using the panel
+## Pehle 5 minute
 
-### Create a bot
+1. **Panel kholein** — `http://<vps-ip>:8080` (internet par direct nahi hai to neeche tunnel dekhein)
+2. **Password set karein** — pehli baar panel khud setup screen dikhata hai (kam se kam 6 characters)
+3. **OS Images** page → "Ubuntu 24.04" ya "Alpine" par **Download** (Alpine 60 MB, Ubuntu ~300 MB)
+4. **+ Naya VPS** → naam, CPU, RAM, disk, user, password → Create
+5. VM card par **Console** → browser me boot log aayega (`login:` prompt)
+6. Wahi user/password se console me login karein ya **SSH** se judein
 
-1. Click **New bot**.
-2. Pick a name and a runtime:
-   - **Node.js** → `node index.js`
-   - **Python 3** → `python3 -u main.py`
-   - **Bash script** → `bash start.sh`
-   - **Custom command** → anything, e.g. `java -jar server.jar` or `./my-binary --port 8080`
-3. BotDeck creates the folder and a starter file. Start it, then edit files in the **Files** tab.
+VM 30 second me ban jata hai. Boot time: KVM par ~15–30s, TCG par 3–10 min (Alpine fastest).
 
-### Bot settings
+---
 
-| Setting | Meaning |
+## VM ke andar ghusne ke 3 raaste
+
+### 1. Browser console (sabse aasan)
+
+VM page par serial console live chalta hai. Click karke type karein — Enter, arrows, Ctrl+C sab kaam karte hain. Boot problems yahin dikhti hain (kernel panic, cloud-init error, login prompt).
+
+### 2. SSH (VPS ke andar se)
+
+Har VM ko ek host port milta hai (22000 se shuru), jo sirf `127.0.0.1` par khula hai:
+
+```bash
+# VPS par ssh karne ke baad:
+ssh -p 22001 ubuntu@127.0.0.1
+```
+
+Port aur password VM page ke "Access" card me dikhte hain.
+
+### 3. Laptop se SSH (tunnel ke saath)
+
+Aapka VPS NAT ke peeche hai to pehle ek local-forward tunnel banayein:
+
+```bash
+# laptop par — VPS ka SSH 22 khula hona chahiye
+ssh -L 22001:127.0.0.1:22001 root@<vps-ip>
+# phir dusre terminal me:
+ssh -p 22001 ubuntu@127.0.0.1
+```
+
+### Doston ko dena hai?
+
+Har VM ke "Share" card me ek **console link** hota hai:
+
+```
+https://<panel-url>/#/console/<random-token>
+```
+
+Ye link sirf wahi VM ka terminal kholta hai — panel ka control, delete, ya doosre VMs ka access nahi milta. Token VM page se kabhi bhi naya bana sakte hain (reinstall/delete karne par purana link mar jata hai).
+
+> Share link ke liye panel internet se reachable hona chahiye (tunnel/domain). Neeche dekhein.
+
+---
+
+## Panel internet par kaise laayein (NAT ke peeche ho to)
+
+Agar `http://<vps-ip>:8080` nahi khul raha (private IP / NAT), do options:
+
+**Pinggy (free, test ke liye):**
+
+```bash
+ssh -p 443 -R0:localhost:8080 a.pinggy.io     # URL terminal me milega
+ssh -p 443 -R0:localhost:8080 qr@a.pinggy.io  # QR code ke saath
+```
+
+**Cloudflare Tunnel (permanent):**
+
+```bash
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+chmod +x /usr/local/bin/cloudflared
+cloudflared tunnel --url http://localhost:8080
+```
+
+Dono me URL public hota hai — **strong password rakhein**, aur kaam khatam hone par tunnel band kar dein. Permanent solution: domain + Nginx/Caddy reverse proxy (HTTPS) — `proxy_buffering off;` lagayein taaki console stream na ruke:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+}
+```
+
+---
+
+## VM management
+
+| Kaam | Kaise |
 |---|---|
-| **Entry file / command** | File run inside the bot folder, or a full shell command for the *custom* runtime. |
-| **Arguments** | Extra CLI arguments, e.g. `--shard 1 --token abc`. |
-| **Port** | Optional. Injected as `PORT` env var and shown as a clickable link in the header. |
-| **Memory limit** | `0` = unlimited. Checked every 5 seconds; bot is stopped when exceeded. |
-| **Auto-restart** | Restart automatically after a crash (exit code ≠ 0 / signal). |
-| **Max restart attempts** | Stops trying after N failures. Counter resets after 60 s of healthy uptime. |
-| **Start with panel** | Add to autostart after server/panel reboot. |
-| **Environment variables** | Passed directly to the process (`process.env` / `os.environ`). |
+| **Start / Stop / Restart** | VM card ya VM page ke buttons |
+| **Console** | VM page (live serial), share link se bhi |
+| **CPU / RAM badalna** | Settings → VM stop karke save karein |
+| **Disk badhana** | Settings → Resize (sirf badha sakte hain, VM band ho) |
+| **Clone** | poori VM ki copy (naya password, naya port) |
+| **Reinstall** | disk naye siro se (cloud-init dobara chalta hai — naya password/key apply) |
+| **Snapshots** | Create / Restore / Delete (chal rahi VM par bhi) |
+| **Autostart** | host reboot par VM khud chalu |
+| **Delete** | disk + config hamesha ke liye jaata hai |
 
-Python bots get `PYTHONUNBUFFERED=1` automatically so logs appear instantly.
-`HOME`, `PWD`, `BOT_ID`, `BOT_NAME` and `BOT_DIR` are always set for the bot.
+Sab kuch `data/` me rehta hai:
 
-### Files
+```
+/opt/vpsdeck/data/
+├── panel.json          # config (VM list, password hash, settings)
+├── port                # panel port
+├── panel.pid, panel.log
+├── images/             # base images (Ubuntu/Debian/Alpine) + uploaded ISOs
+└── vms/<vm-id>/
+    ├── disk.qcow2      # VM ka disk (base image ka overlay — patla file)
+    ├── seed.iso        # cloud-init: user, password, SSH keys
+    ├── qemu.pid        # qemu process id
+    ├── qmp.sock        # control socket (QEMU)
+    └── serial.sock     # console socket
+```
 
-Everything in a bot folder is editable from the **Files** tab:
-
-- drag & drop to upload (any file type, up to 256 MB per file),
-- click a file to edit it in the code editor (`Ctrl`/`Cmd` + `S` saves),
-- extract `.zip` / `.tar` / `.tar.gz` / `.tgz` in place,
-- rename, download, delete.
-
-### Console
-
-The console streams live output and lets you write to the bot's stdin
-(useful for REPL-style bots). It reconnects automatically if the connection drops.
-Logs survive panel restarts; rotate at 4 MB.
+**Disk space tip:** disk `copy-on-write` hai — 20 GB ka VM banane par shuru me sirf kuch MB leta hai, jitna likhenge utna badhega.
 
 ---
 
-## How it works
+## Errors jo aapko mil sakte hain (aur unka matlab)
 
-```
-┌─────────────────────────────┐
-│  BotDeck panel (Node.js)    │  HTTP + SSE on :3000
-│  store: data/panel.json     │
-└──────────────┬──────────────┘
-               │ spawn() / SIGTERM / SIGKILL (process group)
-     ┌─────────┼──────────┬──────────────┐
-   bot A     bot B      bot C          bot N
-  bots/<id>/  own cwd, HOME, env, log
-```
+| Message | Matlab / fix |
+|---|---|
+| `QEMU installed nahi hai` | `sudo apt install -y qemu-system-x86 qemu-utils`, phir `vpsdeck restart` |
+| `/dev/kvm nahi mila` | VMs chalenge, par TCG (slow). Provider se nested virtualization on karwayein |
+| `permission denied /dev/kvm` | `sudo usermod -aG kvm vpsdeck && vpsdeck restart` |
+| `QEMU start nahi hua` | RAM kam hai ya KVM permission; `vpsdeck logs` dekhein, VM ki RAM kam karein |
+| Console par kuch nahi | VM boot ho raha hai (TCG me 5 min tak), ya image me cloud-init/serial console support nahi |
+| SSH connect nahi ho raha | VM ka boot pura hone do (login prompt dekho), port sahi hai? `ss -ltn \| grep 22` |
+| `Free SSH port nahi mila` | 22000–22999 poore ho gaye — kuch VMs delete karein ya `SSH_PORT_BASE` badlein |
+| Panel port busy | `vpsdeck port 9090` (ya `PORT=9090` se reinstall) |
+| Image download fail | Server ka internet check karein; ya ISO manually upload karein |
 
-- Each bot is spawned with `detached: true`, giving it its own process group.
-  Stop/kill signals go to `-pid`, so child processes (shell wrappers, spawned
-  workers) are terminated too.
-- Bots run in `bots/<id>/`, which is also their `HOME`.
-- The panel keeps at most 600 log lines in memory per bot for the live console;
-  the full log file is always on disk.
-- Panel crashes cannot leave zombies for long: on boot, `data/runtime.json` is
-  used to kill leftover processes whose working directory belongs to a bot.
-- On `SIGTERM`/`SIGINT` the panel stops all bots cleanly before exiting, which is
-  what happens on `systemctl restart botdeck`.
+Logs:
 
-### Files & folders
-
-```
-/opt/botdeck
-├── server.js            # entry point
-├── src/                 # backend modules
-├── public/              # web UI (no build step)
-├── data/
-│   ├── panel.json       # settings, bot configs, password hash
-│   ├── runtime.json     # pids of running bots (crash cleanup)
-│   └── logs/<bot>.log   # bot logs
-└── bots/<bot-id>/       # each bot's files (cwd + HOME)
+```bash
+vpsdeck logs                    # standalone mode
+journalctl -u vpsdeck -n 100    # systemd mode
 ```
 
-Backup = copy `data/panel.json`, `data/logs/` and `bots/`. Nothing else is state.
+---
+
+## Commands
+
+```bash
+vpsdeck start      # panel chalu
+vpsdeck stop       # panel band (VMs chalte rahenge!)
+vpsdeck restart
+vpsdeck status     # pid, port, health
+vpsdeck logs       # live log
+vpsdeck port 9090  # panel ka port badlo
+```
+
+systemd mode: `systemctl status|restart vpsdeck`
+
+Panel band karne se VMs nahi rukte (wo alag processes hain). VMs rukenge tabhi jab aap stop karein ya host reboot ho (autostart wale wapas chalu ho jate hain).
 
 ---
 
 ## Security
 
-BotDeck is an admin panel: anyone who can log in can run arbitrary code as the
-service user. Treat it like SSH.
+- Password `scrypt` (N=16384) se hash hota hai, `data/panel.json` me salt ke saath
+- Session: HttpOnly cookie (`bd_vps_session`), 7 din, HTTPS par `Secure`
+- Login rate-limit: 10 galat try / 5 minute per IP
+- Har POST/PATCH/DELETE par origin check (CSRF)
+- VM console apne unix socket par chalta hai — network par exposed nahi
+- SSH ports sirf `127.0.0.1` par bind hote hain (public nahi)
+- Panel root ke bajaye `vpsdeck` user se chalta hai; VMs bhi usi user ke
 
-- The installer runs the panel as the unprivileged `botdeck` user, **not root**.
-- Passwords are hashed with scrypt; sessions are random 32-byte tokens stored
-  in memory, sent as `HttpOnly` cookies and/or `Authorization: Bearer` headers.
-- Login attempts are rate limited (10 per IP per 5 minutes).
-- All file operations are sandboxed to the bot's folder (`..` and absolute paths
-  are rejected server-side).
-- Bots inherit the panel user's permissions — do not run the panel as root.
+Kya **nahi** hai: 2FA, multi-user roles, audit log, per-VM hard quotas. Ek admin panel hai — dost ko dena ho to console share link use karein, ya har VM ka SSH (tunnel ke saath).
 
-**Put it behind HTTPS** — a domain + Caddy is the easiest:
+---
 
-```caddyfile
-panel.example.com {
-    reverse_proxy 127.0.0.1:3000
-}
+## API (chhota reference)
+
+Sab `/api/*` routes cookie ya `Authorization: Bearer <token>` maangte hain (`/api/health` chhod ke).
+
 ```
-
-Nginx equivalent (SSE needs buffering off):
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name panel.example.com;
-    # ssl_certificate ...;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_buffering off;          # required for the live console
-        proxy_read_timeout 3600s;     # keep SSE connections open
-    }
-}
-```
-
-### No public IP? Tunnel it (testing only)
-
-If the panel port is not reachable from the internet (private IP, firewall,
-CGNAT), you can expose it temporarily with a tunnel. Use the port printed by
-`botdeck status` (or your systemd unit):
-
-**Pinggy** (free, ssh based, URL changes every session, ~60 min):
-
-```bash
-ssh -p 443 -R0:localhost:8080 a.pinggy.io
-# add qr@ before the host to get a QR code:  qr@a.pinggy.io
-```
-
-It prints a public `https://….pinggy.link` URL — open that in the browser.
-
-**Cloudflare Tunnel** (permanent, needs a free Cloudflare account):
-
-```bash
-cloudflared tunnel --url http://localhost:8080
-```
-
-The panel itself needs no special configuration behind a tunnel. Remember the
-public URL can be opened by anyone: use a strong admin password and close the
-tunnel when you are done testing. For real deployments prefer a domain with
-HTTPS (Caddy/Nginx above) over a public tunnel.
-
-When using a reverse proxy, bind the panel to localhost only:
-
-```bash
-# /etc/systemd/system/botdeck.service
-Environment=HOST=127.0.0.1
+POST   /api/auth/setup            { password }             pehli baar
+POST   /api/auth/login            { password }             cookie set
+GET    /api/system                                         host + qemu info
+GET    /api/vms                                            list + live status
+POST   /api/vms                   { name, imageId, cpu, memMB, diskGB, user, password, sshKeys[], start }
+POST   /api/vms/:id/start|stop|restart|reinstall|clone|resize
+PATCH  /api/vms/:id               { name, cpu, memMB, password, autostart, notes }
+DELETE /api/vms/:id
+GET    /api/vms/:id/ssh                                    ssh command + password
+GET    /api/vms/:id/snapshots     POST same (create), /:tag/restore, DELETE /:tag
+GET    /api/vms/:id/console       SSE stream (boot log / serial)
+POST   /api/vms/:id/console       { data }                 keyboard input
+GET    /api/public/console/:token                          friend share link (no auth)
+GET    /api/images                                         catalog + installed + progress
+POST   /api/images/download       { id | url, name }
+POST   /api/images/upload?name=x.iso                       raw body upload
+DELETE /api/images/:id
+POST   /api/settings              { sshHost, panelName }
+POST   /api/panel/password        { current, next }
 ```
 
 ---
 
-## Configuration
+## Architecture (ek nazar me)
 
-Environment variables (all optional):
-
-| Variable | Default | Description |
-|---|---|---|
-| `PORT` | `3000` | HTTP port |
-| `HOST` | `0.0.0.0` | Bind address |
-| `DATA_DIR` | `./data` | Panel database + logs |
-| `BOTS_DIR` | `./bots` | Bot folders |
-| `BOTDECK_PASSWORD` | – | Set the admin password on first start (min 8 chars), handy for automated installs |
-| `PYTHON` | `python3` | Python interpreter used for Python bots |
-
-Panel name can be changed in **Panel settings** (stored in `data/panel.json`).
-
-### Service commands
-
-With systemd:
-
-```bash
-systemctl status botdeck
-systemctl restart botdeck      # graceful: stops bots first, autostart bots come back
-journalctl -u botdeck -f       # panel logs
-journalctl -u botdeck -n 100 --no-pager
+```
+server.js            HTTP server, static files, banner, graceful shutdown
+src/routes.js        poora REST API + SSE console proxy
+src/vms.js           VM lifecycle (create/clone/reinstall/snapshot/resize)
+src/qemu.js          QEMU args, start/stop, KVM vs TCG detect
+src/qmp.js           QEMU Machine Protocol client (unix socket, JSON)
+src/serial.js        serial console bridge (socket → SSE, input → socket)
+src/iso.js           apna ISO9660+Joliet writer (cloud-init seed ke liye)
+src/cloudinit.js     user-data / meta-data generation
+src/images.js        base image catalog, download, upload
+src/store.js         data/panel.json (serialized atomic writes)
+src/auth.js          scrypt, sessions, rate limit
+src/util.js          helpers (exec, ports, /proc info)
+public/              SPA (vanilla JS + CSS, koi framework nahi)
+scripts/             install / service / uninstall
+tests/               iso-test, lifecycle-test (mock qemu), ui-smoke
 ```
 
-Without systemd:
-
-```bash
-botdeck status
-botdeck restart                # graceful, same behaviour
-botdeck logs                   # tail -f /opt/botdeck/data/panel.log
-```
+Koi npm dependency nahi (production me). Node ke built-ins hi kaafi hain.
 
 ---
 
-## HTTP API
-
-All endpoints are JSON and require the session (cookie or `Authorization: Bearer <token>`).
-
-<details>
-<summary><b>Auth</b></summary>
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/auth/status` | setup required? panel name |
-| `POST` | `/api/auth/setup` | `{password}` first-run |
-| `POST` | `/api/auth/login` | `{password}` → `{token}` |
-| `POST` | `/api/auth/logout` | destroy session |
-| `POST` | `/api/auth/password` | `{current, next}` |
-
-</details>
-
-<details>
-<summary><b>Bots</b></summary>
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/overview` | bots + system stats |
-| `GET` | `/api/bots` | list bots |
-| `POST` | `/api/bots` | `{name, runtime, start?, autostart?}` create |
-| `GET` | `/api/bots/:id` | one bot |
-| `PATCH` | `/api/bots/:id` | update config / env |
-| `DELETE` | `/api/bots/:id?files=1` | delete bot (optionally its folder) |
-| `POST` | `/api/bots/:id/start\|stop\|restart\|kill` | process control |
-| `POST` | `/api/bots/:id/clone` | `{name}` duplicate bot + files |
-| `POST` | `/api/bots/actions` | `{action:"start-all"\|"stop-all"\|"restart-all"}` |
-| `POST` | `/api/bots/:id/input` | `{data}` write to stdin |
-| `GET` | `/api/bots/:id/logs?lines=300` | log tail |
-| `GET` | `/api/bots/:id/logs/download` | download log file |
-| `DELETE` | `/api/bots/:id/logs` | clear log |
-| `GET` | `/api/bots/:id/stream?token=…` | SSE: `log` + `status` events |
-
-</details>
-
-<details>
-<summary><b>Files</b></summary>
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/bots/:id/files?path=` | list folder |
-| `GET` | `/api/bots/:id/files/read?path=` | read text file |
-| `PUT` | `/api/bots/:id/files/write?path=` | `{content}` save text file |
-| `PUT` | `/api/bots/:id/files/upload?path=&name=` | raw binary upload |
-| `GET` | `/api/bots/:id/files/download?path=` | download file |
-| `POST` | `/api/bots/:id/files/mkdir` | `{path}` |
-| `POST` | `/api/bots/:id/files/rename` | `{from, to}` |
-| `POST` | `/api/bots/:id/files/delete` | `{path}` |
-| `POST` | `/api/bots/:id/files/extract` | `{path}` unzip / untar |
-
-</details>
-
-Example:
+## Develop / test
 
 ```bash
-TOKEN=$(curl -s -X POST localhost:3000/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"password":"your-password"}' | jq -r .token)
-
-curl -s -X POST localhost:3000/api/bots \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"name":"My Bot","runtime":"node","start":true}' | jq
-
-curl -sN "localhost:3000/api/bots/<id>/stream?token=$TOKEN"   # live console
+node server.js                       # data/ repo ke andar
+node tests/iso-test.js               # ISO + cloud-init checks
+node tests/lifecycle-test.js         # poora VM lifecycle (mock QEMU — real QEMU ki zaroorat nahi)
+npm i --no-save jsdom && node tests/ui-smoke.js   # UI smoke test
 ```
+
+`tests/mock-qemu.js` ek fake QEMU hai jo QMP + serial sockets khol deta hai — isliye sandbox/CI me bhi poora panel test ho jata hai.
 
 ---
-
-## Updating
-
-```bash
-# installed with the one-liner:
-curl -fsSL https://raw.githubusercontent.com/siddhantpashte123-hub/blueeee/arena/ac969ea0-blueeee/scripts/install.sh | sudo bash
-
-# installed from a clone:
-cd botdeck && git pull && sudo bash scripts/install.sh
-```
-
-`data/` and `bots/` are never touched by the installer. Bots with
-"start with panel" enabled come back automatically.
 
 ## Uninstall
 
 ```bash
-sudo bash scripts/uninstall.sh            # removes the service, keeps data
-sudo bash scripts/uninstall.sh --purge    # also deletes /opt/botdeck
+sudo bash scripts/uninstall.sh          # panel hatao, data/VMs rakho
+sudo bash scripts/uninstall.sh --purge  # sab kuch delete (VM disks bhi)
 ```
 
 ---
-
-## Troubleshooting
-
-**Port already in use**  
-The installer now detects a busy port and switches to the next free one itself
-(it prints the chosen port at the end). Without systemd: `botdeck port 8090`.
-With systemd: change `Environment=PORT=` in `/etc/systemd/system/botdeck.service`
-and `systemctl daemon-reload && systemctl restart botdeck`. Manual runs: `PORT=3001 node server.js`.
-
-**Bot exits immediately**  
-Open the bot's **Console** and read the error. Common causes: wrong entry file,
-missing `npm install` inside the bot folder, missing interpreter
-(`python3: not found`), or a syntax error. The console shows the exact reason.
-
-**"Entry file was not found"**  
-Upload your bot files first (Files → Upload) or fix the entry path in settings.
-
-**Bot won't stop**  
-Use **Force kill** (SIGKILL). On the settings tab it's under *Danger zone*.
-
-**Live console not updating behind Nginx**  
-Set `proxy_buffering off;` and raise `proxy_read_timeout` for the location.
-
-**The installer still says "Creating systemd service" (old version)**  
-`raw.githubusercontent.com` caches for a few minutes. Use the commit-pinned URL
-from the releases section / add a cache buster: `...install.sh?cb=$(date +%s)`.
-The installer prints its version in the banner (`installer v2.1`), so you can
-tell immediately whether you got the current script.
-
-**`systemctl: command not found` during install**  
-That host has no systemd. The current installer detects this and switches to
-standalone mode automatically (`botdeck` control script + cron autostart) —
-just re-run the install command.
-
-**`botdeck: command not found` (standalone install)**  
-The script is `/usr/local/bin/botdeck`; check that `/usr/local/bin` is in `PATH`.
-
-**Everything is unreachable**  
-`systemctl status botdeck`, then `journalctl -u botdeck -n 100 --no-pager`.
-Check the cloud provider firewall allows your port.
-
-**Python bots show no output**  
-BotDeck already passes `PYTHONUNBUFFERED=1`; if your script buffers on its own,
-call `print(..., flush=True)` or run Python with `-u`.
-
----
-
-## Development
-
-```bash
-node server.js          # http://localhost:3000, auto-creates data/ and bots/
-npm run dev             # same, with --watch for backend reloads
-node --check public/assets/app.js
-```
-
-Dev UI smoke test (needs `npm i --no-save jsdom` and a running panel):
-
-```bash
-node tests/ui-smoke.js
-```
-
-The frontend is plain HTML/CSS/JS — no bundler, no framework, no build step.
-Edit `public/` and refresh.
 
 ## License
 
-MIT
+MIT — `LICENSE` dekhein.

@@ -1,177 +1,178 @@
 #!/usr/bin/env bash
+# VPSDeck control script (systemd ke bina chalne wale hosts ke liye)
+# Installer isko /usr/local/bin/vpsdeck par likhta hai aur upar variables bhi.
 #
-# BotDeck process control — used on servers without systemd (containers,
-# OpenVZ/LXC, minimal images...). Installed as /usr/local/bin/botdeck.
+#   vpsdeck start | stop | restart | status | logs | port <n>
 #
-#   botdeck start | stop | restart | status | logs
-#
-set -uo pipefail
+# Zaroori: start hone ke baad panel apni alag session me chalta hai,
+# isliye Ctrl+C ya SSH band karne se panel/VMs nahi rukte.
 
-APP_DIR="__APP_DIR__"
-NODE_BIN="__NODE_BIN__"
-PORT="__PORT__"
-SERVICE_USER="__SERVICE_USER__"
-NAME="__SERVICE_NAME__"
+PID_FILE="${PID_FILE:-$APP_DIR/data/panel.pid}"
+LOG_FILE="${LOG_FILE:-$APP_DIR/data/panel.log}"
+PORT_FILE="${PORT_FILE:-$APP_DIR/data/port}"
+LAUNCH="$APP_DIR/data/launch.sh"
+DEFAULT_PORT="${DEFAULT_PORT:-8080}"
 
-PID_FILE="${APP_DIR}/data/panel.pid"
-LOG_FILE="${APP_DIR}/data/panel.log"
-PORT_FILE="${APP_DIR}/data/port"
+c_ok="\033[32m"; c_dim="\033[2m"; c_b="\033[1m"; c_0="\033[0m"
 
-# A port chosen with `botdeck port <n>` wins over the one baked in at install.
-if [ -f "$PORT_FILE" ]; then
-  SAVED_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
-  case "$SAVED_PORT" in
-    ''|*[!0-9]*) ;;
-    *) PORT="$SAVED_PORT" ;;
-  esac
-fi
-
-port_free() {
-  local p="$1"
-  "$NODE_BIN" -e '
-    const net = require("net");
-    const port = Number(process.argv[1]);
-    const server = net.createServer();
-    server.once("error", () => process.exit(1));
-    server.once("listening", () => server.close(() => process.exit(0)));
-    server.listen(port, "0.0.0.0");
-  ' "$p" >/dev/null 2>&1
+panel_pid() {
+  [ -f "$PID_FILE" ] || return 1
+  local p
+  p="$(cat "$PID_FILE" 2>/dev/null | tr -dc '0-9')"
+  [ -n "$p" ] || return 1
+  kill -0 "$p" 2>/dev/null || return 1
+  echo "$p"
 }
 
-# When called as root, drop to the service user so panel files stay owned by it.
-if [ "$(id -u)" -eq 0 ] && [ "$SERVICE_USER" != "root" ] && [ "$(id -un)" != "$SERVICE_USER" ]; then
-  if command -v su >/dev/null 2>&1; then
-    if [ "$#" -eq 0 ]; then set -- status; fi
-    REEXEC="$(printf '%q ' "$0" "$@")"
-    exec su -s /bin/bash "$SERVICE_USER" -c "$REEXEC"
-  fi
-  echo "warning: 'su' not found — running the panel as root" >&2
-fi
+current_port() {
+  local p=""
+  [ -f "$PORT_FILE" ] && p="$(cat "$PORT_FILE" 2>/dev/null | tr -dc '0-9')"
+  echo "${p:-$DEFAULT_PORT}"
+}
 
-is_running() {
-  [ -f "$PID_FILE" ] || return 1
-  local pid
-  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-  [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null
+as_user() {
+  # $1 = command string
+  if [ "$(id -u)" = "0" ] && [ -n "${SERVICE_USER:-}" ] && [ "$SERVICE_USER" != "root" ]; then
+    su -s /bin/bash "$SERVICE_USER" -c "$1"
+  else
+    bash -c "$1"
+  fi
+}
+
+write_launcher() {
+  local port="$1"
+  mkdir -p "$APP_DIR/data"
+  cat > "$LAUNCH" <<EOF
+#!/usr/bin/env bash
+cd "$APP_DIR" || exit 1
+export APP_DIR="$APP_DIR"
+export PORT="$port"
+export NODE_ENV=production
+echo \$\$ > "$PID_FILE"
+exec "$NODE_BIN" "$APP_DIR/server.js"
+EOF
+  chmod 755 "$LAUNCH"
+  if [ "$(id -u)" = "0" ] && [ -n "${SERVICE_USER:-}" ] && [ "$SERVICE_USER" != "root" ]; then
+    chown "$SERVICE_USER" "$LAUNCH" 2>/dev/null || true
+    touch "$LOG_FILE" 2>/dev/null || true
+    chown "$SERVICE_USER" "$LOG_FILE" 2>/dev/null || true
+  fi
 }
 
 cmd_start() {
-  if is_running; then
-    echo "BotDeck is already running (pid $(cat "$PID_FILE")) on port ${PORT}"
+  local pid
+  if pid="$(panel_pid)"; then
+    printf "  ${c_ok}✓${c_0} panel pehle se chal raha hai (pid %s, port %s)\n" "$pid" "$(current_port)"
     return 0
   fi
-  mkdir -p "$APP_DIR/data" "$APP_DIR/bots"
-
-  if ! port_free "$PORT"; then
-    echo "Port ${PORT} is already in use by another program."
-    echo "Pick another port, for example:  $(basename "$0") port $((PORT + 1))"
-    echo "Then:                            $(basename "$0") restart"
-    return 1
-  fi
-
-  cd "$APP_DIR" || return 1
-
-  export NODE_ENV=production
-  export PORT
-  export HOST=0.0.0.0
-  export DATA_DIR="$APP_DIR/data"
-  export BOTS_DIR="$APP_DIR/bots"
+  local port
+  port="$(current_port)"
+  while ! node -e "const n=require('net');const s=n.createServer();s.once('error',()=>process.exit(1));s.once('listening',()=>s.close(()=>process.exit(0)));s.listen(${port},'0.0.0.0');" 2>/dev/null; do
+    printf "  port %s busy hai — agla try kar raha hoon\n" "$port"
+    port=$((port + 1))
+    [ "$port" -gt 65000 ] && { echo "  koi free port nahi mila"; return 1; }
+  done
+  echo "$port" > "$PORT_FILE"
+  [ "$(id -u)" = "0" ] && chown "${SERVICE_USER:-root}" "$PORT_FILE" 2>/dev/null || true
 
   rm -f "$PID_FILE"
-  # `setsid` gives the panel its own session, so Ctrl+C / closing the terminal /
-  # ending this su session cannot kill it. The child writes its own pid so the
-  # pid file is correct even if setsid forks.
-  local launcher=""
-  if command -v setsid >/dev/null 2>&1; then
-    launcher="setsid"
-  fi
+  write_launcher "$port"
+  # setsid => apni session, terminal band hone par bhi zinda
+  as_user "nohup setsid '$LAUNCH' >> '$LOG_FILE' 2>&1 < /dev/null &" >/dev/null 2>&1
 
-  nohup $launcher bash -c 'echo $$ > "$0"; exec "$1" "$2"' \
-    "$PID_FILE" "$NODE_BIN" "$APP_DIR/server.js" >> "$LOG_FILE" 2>&1 < /dev/null &
-  sleep 2
-
-  if is_running; then
-    echo "BotDeck started on port ${PORT} (pid $(cat "$PID_FILE"))"
-    return 0
-  fi
-  echo "BotDeck failed to start. Last log lines:"
-  tail -n 20 "$LOG_FILE" 2>/dev/null
-  rm -f "$PID_FILE"
+  local i=0
+  while [ $i -lt 40 ]; do
+    if pid="$(panel_pid)"; then
+      printf "  ${c_ok}✓${c_0} panel start ho gaya (pid %s)\n" "$pid"
+      printf "  ${c_dim}http://localhost:%s${c_0}\n" "$port"
+      return 0
+    fi
+    sleep 0.4
+    i=$((i + 1))
+  done
+  echo "  ✗ panel start nahi hua — log dekhein: vpsdeck logs"
+  [ -f "$LOG_FILE" ] && tail -n 15 "$LOG_FILE"
   return 1
 }
 
 cmd_stop() {
-  if ! is_running; then
+  local pid
+  if ! pid="$(panel_pid)"; then
+    echo "  panel band hai (kuch karne ki zaroorat nahi)"
     rm -f "$PID_FILE"
-    echo "BotDeck is not running"
     return 0
   fi
-  local pid i
-  pid="$(cat "$PID_FILE")"
-  kill -TERM "$pid" 2>/dev/null
-  for i in $(seq 1 30); do
-    is_running || break
-    sleep 1
+  kill "$pid" 2>/dev/null || true
+  local i=0
+  while [ $i -lt 40 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25
+    i=$((i + 1))
   done
-  if is_running; then
-    echo "Panel did not stop within 30s — sending SIGKILL"
-    kill -KILL "$pid" 2>/dev/null
-    sleep 1
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+    echo "  panel ko force stop kiya"
+  else
+    printf "  ${c_ok}✓${c_0} panel band ho gaya (VMs chalte rahenge)\n"
   fi
   rm -f "$PID_FILE"
-  echo "BotDeck stopped"
+}
+
+cmd_status() {
+  local pid port
+  port="$(current_port)"
+  if pid="$(panel_pid)"; then
+    printf "  ${c_ok}●${c_0} ${c_b}running${c_0}  pid %s · port %s\n" "$pid" "$port"
+    printf "  ${c_dim}http://localhost:%s${c_0}\n" "$port"
+    if command -v curl >/dev/null; then
+      local h
+      h="$(curl -fsS --max-time 3 "http://127.0.0.1:${port}/api/health" 2>/dev/null || true)"
+      [ -n "$h" ] && printf "  ${c_dim}health: %s${c_0}\n" "$h"
+    fi
+    return 0
+  fi
+  printf "  ${c_dim}●${c_0} stopped (port %s)\n" "$port"
+  return 1
+}
+
+cmd_logs() {
+  [ -f "$LOG_FILE" ] || { echo "  log file abhi nahi hai: $LOG_FILE"; return 1; }
+  tail -n "${LINES:-60}" "$LOG_FILE"
+  [ -t 1 ] && { echo; echo "  (Ctrl+C dabayein — panel nahi rukega)"; tail -f "$LOG_FILE"; }
+}
+
+cmd_port() {
+  local newp="$1"
+  case "$newp" in
+    ''|*[!0-9]*) echo "  usage: vpsdeck port <number>  (jaise: vpsdeck port 9090)"; return 1 ;;
+  esac
+  if [ "$newp" -lt 1 ] || [ "$newp" -gt 65535 ]; then
+    echo "  port 1-65535 ke beech hona chahiye"; return 1
+  fi
+  mkdir -p "$APP_DIR/data"
+  echo "$newp" > "$PORT_FILE"
+  [ "$(id -u)" = "0" ] && chown "${SERVICE_USER:-root}" "$PORT_FILE" 2>/dev/null || true
+  printf "  ${c_ok}✓${c_0} port %s save ho gaya\n" "$newp"
+  if panel_pid >/dev/null; then
+    cmd_stop >/dev/null
+    DEFAULT_PORT="$newp" cmd_start
+  fi
 }
 
 case "${1:-status}" in
-  start)
-    cmd_start
-    ;;
-  stop)
-    cmd_stop
-    ;;
-  restart)
-    cmd_stop
-    sleep 1
-    cmd_start
-    ;;
-  status)
-    if is_running; then
-      echo "running (pid $(cat "$PID_FILE")) on port ${PORT}"
-    else
-      echo "stopped"
-      exit 3
-    fi
-    ;;
-  logs)
-    tail -n 100 -f "$LOG_FILE"
-    ;;
-  port)
-    case "${2:-}" in
-      ''|*[!0-9]*)
-        echo "usage: ${NAME} port <1-65535>"
-        exit 1
-        ;;
-    esac
-    if [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then
-      echo "Port must be between 1 and 65535"
-      exit 1
-    fi
-    mkdir -p "$APP_DIR/data"
-    echo "$2" > "$PORT_FILE"
-    PORT="$2"
-    echo "Port set to $2"
-    if is_running; then
-      echo "Restarting BotDeck on the new port…"
-      cmd_stop
-      sleep 1
-      cmd_start
-    else
-      echo "Start it with: ${NAME} start"
-    fi
-    ;;
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_stop; cmd_start ;;
+  status)  cmd_status ;;
+  logs)    cmd_logs ;;
+  port)    shift; cmd_port "${1:-}" ;;
   *)
-    echo "usage: ${NAME} {start|stop|restart|status|logs|port <n>}"
-    exit 1
+    echo "  VPSDeck — commands:"
+    echo "    vpsdeck start       panel chalu karein"
+    echo "    vpsdeck stop        panel band karein (VMs chalte rahenge)"
+    echo "    vpsdeck restart     restart"
+    echo "    vpsdeck status      chal raha hai ya nahi"
+    echo "    vpsdeck logs        panel log dekhein"
+    echo "    vpsdeck port 9090   panel ka port badlein"
     ;;
 esac

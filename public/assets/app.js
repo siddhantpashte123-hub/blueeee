@@ -1,2379 +1,1307 @@
-'use strict';
+/* VPSDeck frontend — plain JS, koi framework nahi. */
+(() => {
+  'use strict';
 
-/* ============================================================
-   BotDeck panel — frontend (no build step, no dependencies)
-   ============================================================ */
+  const app = document.getElementById('app');
+  const S = {
+    view: 'vms',
+    authed: false,
+    needsSetup: false,
+    system: null,
+    vms: [],
+    images: { images: [], catalog: [] },
+    vm: null,
+    term: null,
+    pollTimer: null,
+    imgTimer: null,
+    route: { name: 'vms', id: null, token: null }
+  };
 
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  // ---------------- helpers ----------------
+  const esc = (s) =>
+    String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const POLL_MS = 3000;
-const MAX_DOM_LOGS = 1200;
-
-const state = {
-  token: localStorage.getItem('bd_token') || '',
-  status: null,
-  me: null,
-  overview: null,
-  bots: [],
-  route: { name: '', id: null, tab: null },
-  search: '',
-  filePath: '',
-  stream: null,
-  streamBotId: null,
-  autoscroll: localStorage.getItem('bd_autoscroll') !== '0',
-  pollHandle: null,
-  uploadDir: null,
-  uploadBotId: null,
-  lastRenderedBotId: null,
-  lastRenderedTab: null
-};
-
-/* ------------------------------ helpers ------------------------------ */
-
-const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-const esc = (value) => String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => ESCAPES[ch]);
-const icon = (name, cls = '') => `<svg class="ic ${cls}"><use href="#i-${name}"/></svg>`;
-
-function fmtBytes(bytes) {
-  const n = Number(bytes) || 0;
-  if (n < 1024) return n + ' B';
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let value = n / 1024;
-  let i = 0;
-  while (value >= 1024 && i < units.length - 1) {
-    value /= 1024;
-    i++;
-  }
-  return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[i]}`;
-}
-
-function fmtDuration(ms) {
-  const total = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
-  const d = Math.floor(total / 86400);
-  const h = Math.floor((total % 86400) / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (d) return `${d}d ${h}h`;
-  if (h) return `${h}h ${m}m`;
-  if (m) return `${m}m ${s}s`;
-  return `${s}s`;
-}
-
-function pct(part, total) {
-  if (!total) return 0;
-  return Math.max(0, Math.min(100, (part / total) * 100));
-}
-
-function fmtPct(n) {
-  const value = Number(n) || 0;
-  return value < 10 ? value.toFixed(1) : value.toFixed(0);
-}
-
-function initials(name) {
-  return String(name || '?')
-    .trim()
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((part) => part[0] || '')
-    .join('')
-    .toUpperCase() || '?';
-}
-
-function basename(p) {
-  const clean = String(p || '').replace(/\/+$/, '');
-  const index = clean.lastIndexOf('/');
-  return index === -1 ? clean : clean.slice(index + 1);
-}
-
-function dirname(p) {
-  const clean = String(p || '').replace(/\/+$/, '');
-  const index = clean.lastIndexOf('/');
-  return index === -1 ? '' : clean.slice(0, index);
-}
-
-function isActiveStatus(status) {
-  return status === 'running' || status === 'starting' || status === 'restarting' || status === 'stopping';
-}
-
-const ANSI_COLORS = {
-  30: '#6b7a90', 31: '#ff8a8a', 32: '#5ee6a8', 33: '#f7c66b', 34: '#6cb6ff',
-  35: '#d18bff', 36: '#56d9e0', 37: '#e2e8f0', 90: '#7c8ba3', 91: '#ff9d9d',
-  92: '#8af0c4', 93: '#ffd98a', 94: '#9ccbff', 95: '#e4b3ff', 96: '#8fe8ee', 97: '#ffffff'
-};
-
-function ansiToHtml(raw) {
-  const text = String(raw == null ? '' : raw)
-    .replace(/\r/g, '')
-    .replace(/[\x00-\x08\x0b\x0c\x0d\x0e-\x1a\x1c-\x1f\x7f]/g, '');
-  const parts = text.split(/\x1b\[([0-9;]*)m/);
-  let color = null;
-  let bold = false;
-  let out = '';
-  for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 0) {
-      const segment = esc(parts[i]).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-      if (!segment) continue;
-      const style = [];
-      if (color) style.push(`color:${color}`);
-      if (bold) style.push('font-weight:600');
-      out += style.length ? `<span style="${style.join(';')}">${segment}</span>` : segment;
-    } else {
-      for (const code of parts[i].split(';').map(Number)) {
-        if (code === 0) { color = null; bold = false; }
-        else if (code === 1) bold = true;
-        else if (code === 22) bold = false;
-        else if (code === 39) color = null;
-        else if (ANSI_COLORS[code]) color = ANSI_COLORS[code];
-      }
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) {
+      n /= 1024;
+      i++;
     }
-  }
-  return out;
-}
-
-/* ------------------------------- api -------------------------------- */
-
-async function api(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (state.token) headers.set('Authorization', `Bearer ${state.token}`);
-
-  let body = options.body;
-  const raw = body instanceof Blob || body instanceof FormData || body instanceof ArrayBuffer;
-  if (body !== undefined && body !== null && !raw && typeof body !== 'string') {
-    headers.set('Content-Type', 'application/json');
-    body = JSON.stringify(body);
+    return `${n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)} ${u[i]}`;
   }
 
-  let response;
-  try {
-    response = await fetch(path, { ...options, headers, body });
-  } catch (err) {
-    const error = new Error('Cannot reach the panel — is the server running?');
-    error.network = true;
-    throw error;
+  function toast(msg, kind = '') {
+    let box = document.querySelector('.toasts');
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'toasts';
+      document.body.appendChild(box);
+    }
+    const el = document.createElement('div');
+    el.className = `toast ${kind}`;
+    el.textContent = msg;
+    box.appendChild(el);
+    setTimeout(() => {
+      el.style.opacity = '0';
+      el.style.transition = 'opacity .25s';
+      setTimeout(() => el.remove(), 260);
+    }, kind === 'err' ? 5200 : 3200);
   }
 
-  const text = await response.text();
-  let data = null;
-  if (text) {
+  async function api(path, opts = {}) {
+    const o = Object.assign({ headers: {} }, opts);
+    if (o.body && typeof o.body !== 'string' && !(o.body instanceof Blob)) {
+      o.headers['Content-Type'] = 'application/json';
+      o.body = JSON.stringify(o.body);
+    }
+    const res = await fetch(path, o);
+    let data = null;
+    const txt = await res.text();
     try {
-      data = JSON.parse(text);
-    } catch (_) {
-      data = text;
+      data = txt ? JSON.parse(txt) : {};
+    } catch {
+      data = { error: txt };
     }
+    if (res.status === 401 && !path.startsWith('/api/public')) {
+      S.authed = false;
+      renderLogin();
+      throw new Error(data.error || 'Login karein');
+    }
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
   }
 
-  if (response.status === 401 && !path.startsWith('/api/auth/')) {
-    const error = new Error('Session expired — please sign in again');
-    error.isAuth = true;
-    handleUnauthorized();
-    throw error;
+  const badge = (vm) => {
+    const st = vm.status || {};
+    if (st.running) return `<span class="badge green"><i class="dot"></i>${esc(st.state || 'running')}</span>`;
+    return '<span class="badge"><i class="dot"></i>stopped</span>';
+  };
+
+  function stopPolling() {
+    if (S.pollTimer) clearInterval(S.pollTimer);
+    S.pollTimer = null;
+    if (S.imgTimer) clearInterval(S.imgTimer);
+    S.imgTimer = null;
   }
-  if (!response.ok) {
-    const message = (data && data.error) || `Request failed (${response.status})`;
-    throw new Error(message);
+
+  // ---------------- shell ----------------
+  function shell(active, content, { wide = false } = {}) {
+    const sys = S.system || {};
+    const accel = sys.accel === 'kvm' ? '<span class="badge green" title="Hardware virtualization">KVM</span>' : '<span class="badge amber" title="Software emulation — slow">TCG</span>';
+    app.innerHTML = `
+      <div class="topbar">
+        <a class="brand" href="#/"><img src="/assets/favicon.svg" alt=""/>VPSDeck <span class="sub">v${esc(sys.version || '1.0.0')}</span></a>
+        <nav class="nav">
+          <a href="#/" class="${active === 'vms' ? 'active' : ''}">Mere VPS</a>
+          <a href="#/images" class="${active === 'images' ? 'active' : ''}">OS Images</a>
+          <a href="#/settings" class="${active === 'settings' ? 'active' : ''}">Settings</a>
+        </nav>
+        <div class="grow"></div>
+        ${accel}
+        <button class="ghost sm" id="btn-logout">Logout</button>
+      </div>
+      <div class="wrap">${content}</div>
+    `;
+    const lo = document.getElementById('btn-logout');
+    if (lo)
+      lo.onclick = async () => {
+        await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
+        S.authed = false;
+        stopPolling();
+        renderLogin();
+      };
   }
-  return data;
-}
 
-function handleUnauthorized() {
-  state.token = '';
-  localStorage.removeItem('bd_token');
-  state.me = null;
-  stopPolling();
-  closeStream();
-  showAuth(state.status || { setup: false, panelName: 'BotDeck' });
-}
-
-/* --------------------------- notifications -------------------------- */
-
-function toast(message, type = 'info', timeout = 4200) {
-  const wrap = $('#toast-root');
-  if (!wrap) return;
-  const el = document.createElement('div');
-  const glyph = type === 'success' ? 'check' : type === 'error' ? 'alert' : type === 'warn' ? 'alert' : 'zap';
-  el.className = `toast ${type}`;
-  el.innerHTML = `${icon(glyph)}<div>${esc(message)}</div>`;
-  wrap.appendChild(el);
-  setTimeout(() => {
-    el.classList.add('out');
-    setTimeout(() => el.remove(), 240);
-  }, timeout);
-}
-
-/* ------------------------------ modals ------------------------------ */
-
-let modalCleanup = null;
-
-function openModal({ title, subtitle = '', body = '', footer = '', wide = false, onMount, onClose }) {
-  closeModal();
-  const root = $('#modal-root');
-  root.innerHTML = `
-    <div class="modal-backdrop" data-backdrop="1">
-      <div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true">
-        <div class="modal-head">
-          <div>
-            <h3>${esc(title)}</h3>
-            ${subtitle ? `<div class="sub">${esc(subtitle)}</div>` : ''}
-          </div>
-          <button class="icon-btn" data-action="close-modal" title="Close">${icon('x')}</button>
+  // ---------------- auth screens ----------------
+  function renderLogin(setup = false) {
+    stopPolling();
+    if (S.term) S.term.close();
+    S.needsSetup = setup;
+    app.innerHTML = `
+      <div class="login-wrap">
+        <div class="login-card">
+          <div class="brand"><img src="/assets/favicon.svg" alt=""/>VPSDeck</div>
+          <p class="lead">${setup ? 'Pehli baar? Panel ka password set karein.' : 'Apne virtual machines manage karne ke liye login karein.'}</p>
+          <form id="login-form">
+            <label class="field"><span class="lbl">${setup ? 'Naya password' : 'Password'}</span>
+              <input type="password" id="pw" autocomplete="${setup ? 'new-password' : 'current-password'}" placeholder="••••••••" autofocus />
+              ${setup ? '<span class="hint">Kam se kam 6 characters. Yehi password panel kholne ke liye lagega.</span>' : ''}
+            </label>
+            ${setup ? '<label class="field"><span class="lbl">Password dobara</span><input type="password" id="pw2" autocomplete="new-password" /></label>' : ''}
+            <button class="primary" style="width:100%;justify-content:center" type="submit">${setup ? 'Password set karein' : 'Login'}</button>
+          </form>
+          <p class="small mute" style="text-align:center;margin:16px 0 0">VPSDeck — QEMU based, Docker ki zaroorat nahi</p>
         </div>
-        <div class="modal-body">${body}</div>
-        ${footer ? `<div class="modal-foot">${footer}</div>` : ''}
-      </div>
-    </div>`;
-  const backdrop = $('.modal-backdrop', root);
-  backdrop.addEventListener('mousedown', (event) => {
-    if (event.target === backdrop) closeModal();
-  });
-  modalCleanup = onClose || null;
-  const modal = $('.modal', root);
-  if (onMount) requestAnimationFrame(() => onMount(modal));
-  const focusable = $('input:not([type=hidden]), textarea, select, button.primary', modal);
-  if (focusable) requestAnimationFrame(() => focusable.focus());
-  return modal;
-}
-
-function closeModal() {
-  const root = $('#modal-root');
-  if (root) root.innerHTML = '';
-  if (modalCleanup) {
-    try { modalCleanup(); } catch (_) { /* ignore */ }
-    modalCleanup = null;
-  }
-}
-
-function confirmAction({ title, message, confirmText = 'Confirm', danger = true, extra = '', collect }) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      let collected;
-      try {
-        collected = value && collect ? collect() : undefined;
-      } catch (_) {
-        collected = undefined;
-      }
-      closeModal();
-      resolve(value ? { confirmed: true, extra: collected } : false);
-    };
-    const modal = openModal({
-      title,
-      body: `<div style="font-size:13px;color:var(--muted);line-height:1.65">${message}</div>${extra}`,
-      footer: `<button class="btn ghost" data-action="close-modal">Cancel</button>
-        <div class="right"><button class="btn ${danger ? 'danger' : 'primary'}" id="confirm-yes">${esc(confirmText)}</button></div>`,
-      onClose: () => {
-        if (!settled) {
-          settled = true;
-          resolve(false);
-        }
-      }
-    });
-    const button = $('#confirm-yes', modal);
-    button.addEventListener('click', () => finish(true));
-  });
-}
-
-/* ------------------------------ auth -------------------------------- */
-
-function showAuth(status) {
-  state.status = status || state.status;
-  stopPolling();
-  closeStream();
-  $('#app').classList.add('hidden');
-  const screen = $('#auth');
-  screen.classList.remove('hidden');
-  renderAuth(Boolean(state.status && state.status.setup));
-}
-
-function renderAuth(setup) {
-  const card = $('#auth-card');
-  card.innerHTML = `
-    <span class="auth-badge">${icon(setup ? 'zap' : 'lock', 'xs')} ${setup ? 'First run setup' : 'Secure panel'}</span>
-    <h1>${setup ? 'Create admin password' : 'Welcome back'}</h1>
-    <p class="lede">${
-      setup
-        ? 'Secure your panel with a password. You can create and manage unlimited bots after this.'
-        : 'Sign in to manage your bots, logs and files.'
-    }</p>
-    <div class="auth-error" id="auth-error">${icon('alert', 'sm')}<span id="auth-error-text"></span></div>
-    <form id="auth-form" autocomplete="off">
-      <div class="stack" style="gap:14px">
-        <div class="field">
-          <label>Password</label>
-          <input class="input" type="password" id="auth-password" autofocus placeholder="${
-            setup ? 'At least 8 characters' : 'Enter your password'
-          }" autocomplete="${setup ? 'new-password' : 'current-password'}" required>
-        </div>
-        ${
-          setup
-            ? `<div class="field">
-                 <label>Confirm password</label>
-                 <input class="input" type="password" id="auth-confirm" placeholder="Repeat password" required>
-               </div>`
-            : ''
-        }
-        <button class="btn primary block" type="submit" id="auth-submit">
-          ${setup ? 'Create panel' : 'Sign in'} ${icon('chevron-right', 'sm')}
-        </button>
-      </div>
-    </form>`;
-
-  const form = $('#auth-form', card);
-  const errorBox = $('#auth-error', card);
-  const submit = $('#auth-submit', card);
-
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    errorBox.classList.remove('show');
-    const password = $('#auth-password', card).value;
-    if (setup) {
-      const confirm = $('#auth-confirm', card).value;
-      if (password.length < 8) return showAuthError('Password must be at least 8 characters');
-      if (password !== confirm) return showAuthError('Passwords do not match');
-    }
-    if (!password) return showAuthError('Password is required');
-
-    submit.disabled = true;
-    const original = submit.innerHTML;
-    submit.innerHTML = 'Please wait…';
-    try {
-      const endpoint = setup ? '/api/auth/setup' : '/api/auth/login';
-      const data = await api(endpoint, { method: 'POST', body: { password } });
-      state.token = data.token;
-      localStorage.setItem('bd_token', data.token);
-      state.status = { ...(state.status || {}), setup: false, panelName: data.panelName || 'BotDeck' };
-      state.me = { authenticated: true };
-      await startApp();
-    } catch (err) {
-      showAuthError(err.message || 'Login failed');
-    } finally {
-      submit.disabled = false;
-      submit.innerHTML = original;
-    }
-  });
-
-  function showAuthError(message) {
-    $('#auth-error-text', card).textContent = message;
-    errorBox.classList.add('show');
-  }
-}
-
-/* ------------------------------ shell ------------------------------- */
-
-function updatePanelName() {
-  const name = (state.overview && state.overview.panelName) || (state.me && state.me.panelName) || 'BotDeck';
-  const el = $('#panel-name');
-  if (el) el.textContent = name;
-  document.title = `${name} — Bot Hosting Panel`;
-}
-
-function renderShell() {
-  $('#sidebar .brand').setAttribute('href', '#/overview');
-  const footer = $('#side-footer');
-  footer.innerHTML = `
-    <div class="meter-block">
-      <div class="meter-top"><span>System RAM</span><span id="foot-ram">—</span></div>
-      <div class="meter"><i id="foot-ram-bar" style="width:0%"></i></div>
-    </div>
-    <div class="side-user">
-      <span class="avatar">${icon('user', 'sm')}</span>
-      <div class="grow">
-        <div class="who">Admin</div>
-        <div class="role">Panel owner</div>
-      </div>
-      <button class="icon-btn" data-action="logout" title="Sign out">${icon('logout')}</button>
-    </div>`;
-}
-
-async function startApp() {
-  $('#auth').classList.add('hidden');
-  $('#app').classList.remove('hidden');
-  try {
-    state.me = await api('/api/me');
-  } catch (err) {
-    if (err.isAuth) return;
-    toast(err.message, 'error');
-    return;
-  }
-  renderShell();
-  await loadOverview();
-  updatePanelName();
-  if (!location.hash || location.hash === '#') location.hash = '#/overview';
-  onRoute();
-  startPolling();
-}
-
-function startPolling() {
-  stopPolling();
-  state.pollHandle = setInterval(() => {
-    if (document.hidden || !state.me) return;
-    loadOverview();
-  }, POLL_MS);
-}
-
-function stopPolling() {
-  if (state.pollHandle) clearInterval(state.pollHandle);
-  state.pollHandle = null;
-}
-
-/* --------------------------- data loading --------------------------- */
-
-async function loadOverview() {
-  try {
-    const data = await api('/api/overview');
-    state.overview = data;
-    state.bots = data.bots || [];
-    updatePanelName();
-    syncSidebar();
-    syncFooter();
-    if (state.route.name === 'overview' || state.route.name === 'bots') syncBotsView();
-    if (state.route.name === 'bot') {
-      const current = botById(state.route.id);
-      if (current && state.lastRenderedBotId !== current.id) renderBotView();
-      else syncBotLive();
-    }
-    if (state.route.name === 'settings') syncSettingsStats();
-  } catch (err) {
-    if (err.isAuth) return;
-    if (err.network) setConnectionWarning(true);
-  }
-}
-
-function setConnectionWarning(offline) {
-  const dot = $('#conn-state');
-  if (!dot) return;
-  dot.textContent = offline ? 'panel offline — retrying' : 'live';
-}
-
-function botById(id) {
-  return state.bots.find((bot) => bot.id === id) || null;
-}
-
-/* --------------------------- sidebar sync --------------------------- */
-
-function syncSidebar() {
-  const container = $('#side-bots');
-  if (!container) return;
-
-  const countBadge = $('#nav-bot-count');
-  if (countBadge) countBadge.textContent = String(state.bots.length);
-
-  const activeId = state.route.name === 'bot' ? state.route.id : null;
-  const signature = state.bots.map((bot) => `${bot.id}:${bot.name}:${bot.status}`).join('|') + `#${activeId}`;
-  if (container.dataset.sig === signature) return;
-  container.dataset.sig = signature;
-
-  if (!state.bots.length) {
-    container.innerHTML = `
-      <div class="side-empty">
-        No bots yet. Create your first bot and BotDeck will keep it running on this VPS.
-        <button class="btn sm primary" data-action="new-bot">${icon('plus', 'sm')} Create bot</button>
       </div>`;
-    return;
+    const form = document.getElementById('login-form');
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const pw = document.getElementById('pw').value;
+      const btn = form.querySelector('button');
+      btn.disabled = true;
+      try {
+        if (setup) {
+          const pw2 = document.getElementById('pw2').value;
+          if (pw !== pw2) throw new Error('Dono password same nahi hain');
+          await api('/api/auth/setup', { method: 'POST', body: { password: pw } });
+          toast('Password set ho gaya', 'ok');
+        } else {
+          await api('/api/auth/login', { method: 'POST', body: { password: pw } });
+        }
+        S.authed = true;
+        await boot(true);
+      } catch (err) {
+        toast(err.message, 'err');
+        btn.disabled = false;
+      }
+    };
   }
 
-  container.innerHTML = state.bots
-    .map(
-      (bot) => `
-      <a class="side-bot ${bot.id === activeId ? 'active' : ''}" href="#/bot/${bot.id}/console" title="${esc(bot.name)} — ${esc(bot.status)}">
-        <span class="status-dot ${esc(bot.status)}"></span>
-        <span class="name">${esc(bot.name)}</span>
-        ${bot.status === 'running' ? '<span class="status-mini">on</span>' : bot.status === 'crashed' ? '<span class="status-mini" style="color:var(--red)">crash</span>' : ''}
-      </a>`
-    )
-    .join('');
-}
-
-function syncFooter() {
-  const system = state.overview && state.overview.system;
-  if (!system) return;
-  const used = system.memory.total - system.memory.free;
-  const value = pct(used, system.memory.total);
-  const label = $('#foot-ram');
-  const bar = $('#foot-ram-bar');
-  if (label) label.textContent = `${fmtBytes(used)} / ${fmtBytes(system.memory.total)}`;
-  if (bar) {
-    bar.style.width = `${value}%`;
-    bar.className = value > 90 ? 'crit' : value > 75 ? 'warn' : '';
-  }
-}
-
-/* ------------------------------ routing ----------------------------- */
-
-function onRoute() {
-  const raw = (location.hash || '').replace(/^#\/?/, '');
-  const segments = raw.split('?')[0].split('/').filter(Boolean);
-  const previous = state.route;
-
-  closeSidebar();
-
-  const onBotConsole =
-    segments[0] === 'bot' && segments[1] && (!segments[2] || segments[2] === 'console');
-  if (!onBotConsole) closeStream();
-  if (segments[0] !== 'bot') {
-    state.lastRenderedBotId = null;
-    state.lastRenderedTab = null;
+  // ---------------- views ----------------
+  async function loadSystem() {
+    S.system = await api('/api/system');
+    return S.system;
   }
 
-  if (segments[0] === 'bot' && segments[1]) {
-    const tab = ['console', 'files', 'settings'].includes(segments[2]) ? segments[2] : 'console';
-    if (previous.name !== 'bot' || previous.id !== segments[1]) {
-      state.filePath = '';
-      state.lastRenderedBotId = null;
-      state.lastRenderedTab = null;
-    }
-    state.route = { name: 'bot', id: segments[1], tab };
-    setNav('bots');
-    renderBotView();
-    return;
+  async function loadVms() {
+    const d = await api('/api/vms');
+    S.vms = d.vms || [];
+    return S.vms;
   }
 
-  if (segments[0] === 'bots') {
-    state.route = { name: 'bots', id: null, tab: null };
-    setNav('bots');
-    renderBotsView();
-    return;
-  }
+  async function viewVms() {
+    S.view = 'vms';
+    await Promise.all([loadSystem().catch(() => {}), loadVms().catch(() => {})]);
+    const st = (S.system && S.system.stats) || {};
+    const mem = (S.system && S.system.mem) || {};
+    const usedPct = mem.total ? Math.round(((mem.total - mem.free) / mem.total) * 100) : 0;
+    const accelWarn =
+      S.system && S.system.accel !== 'kvm'
+        ? `<div class="hint-box warn">Is VPS par <b>/dev/kvm</b> nahi hai — VMs software mode (TCG) me chalenge.
+            Ye kaam karta hai par slow hota hai. Hosting provider se nested virtualization ON karwayein to 10x+ fast ho jayega.</div>`
+        : '';
 
-  if (segments[0] === 'settings') {
-    state.route = { name: 'settings', id: null, tab: null };
-    setNav('settings');
-    renderSettingsView();
-    return;
-  }
-
-  state.route = { name: 'overview', id: null, tab: null };
-  setNav('overview');
-  renderOverview();
-}
-
-function setNav(name) {
-  $$('.nav-item').forEach((item) => {
-    item.classList.toggle('active', item.dataset.nav === name);
-  });
-}
-
-function navigate(path) {
-  if (location.hash === `#${path}`) onRoute();
-  else location.hash = `#${path}`;
-}
-
-function renderTopbar({ title, subtitle = '', actions = '', back = false }) {
-  const topbar = $('#topbar');
-  topbar.innerHTML = `
-    <button class="icon-btn mobile-menu" data-action="open-sidebar" title="Menu">${icon('menu')}</button>
-    ${back ? `<a class="icon-btn" href="#/bots" title="Back to bots">${icon('arrow-left')}</a>` : ''}
-    <div class="titles">
-      <h1>${esc(title)}</h1>
-      ${subtitle ? `<div class="sub">${subtitle}</div>` : ''}
-    </div>
-    <div class="topbar-actions">${actions}</div>`;
-}
-
-function closeSidebar() {
-  $('#app').classList.remove('sidebar-open');
-}
-
-/* ---------------------------- overview ------------------------------ */
-
-function statusPill(status) {
-  const label = status === 'running' ? 'Running' : status === 'stopped' ? 'Stopped'
-    : status === 'starting' ? 'Starting' : status === 'stopping' ? 'Stopping'
-    : status === 'restarting' ? 'Restarting' : status === 'crashed' ? 'Crashed' : status;
-  return `<span class="pill ${esc(status)}"><span class="dot"></span>${esc(label)}</span>`;
-}
-
-function botRowActions(bot) {
-  const running = isActiveStatus(bot.status);
-  return `<div class="actions">
-    ${
-      running
-        ? `<button class="icon-btn" data-action="bot-op" data-bot="${bot.id}" data-op="restart" title="Restart">${icon('restart')}</button>
-           <button class="icon-btn danger" data-action="bot-op" data-bot="${bot.id}" data-op="stop" title="Stop">${icon('stop')}</button>`
-        : `<button class="icon-btn" data-action="bot-op" data-bot="${bot.id}" data-op="start" title="Start">${icon('play')}</button>`
-    }
-    <button class="icon-btn" data-action="goto-bot" data-bot="${bot.id}" title="Open console">${icon('chevron-right')}</button>
-  </div>`;
-}
-
-function botRowHtml(bot) {
-  const running = isActiveStatus(bot.status);
-  return `
-    <tr data-action="goto-bot" data-bot="${bot.id}">
-      <td>
-        <div class="bot-cell">
-          <span class="bot-avatar">${esc(initials(bot.name))}</span>
-          <div style="min-width:0">
-            <div class="bot-name">${esc(bot.name)}</div>
-            <div class="bot-meta">${esc(bot.runtime)} · ${esc(bot.entry || '—')}</div>
+    const cards = S.vms
+      .map(
+        (vm) => `
+      <div class="card vm-card" data-id="${esc(vm.id)}">
+        <div class="vm-top">
+          <div class="vm-icon">${esc((vm.name || 'VM').slice(0, 2).toUpperCase())}</div>
+          <div style="flex:1;min-width:0">
+            <div class="vm-title">${esc(vm.name)}</div>
+            <div class="vm-sub">${esc(vm.imageName || vm.imageId)} · SSH ${esc(vm.sshPort)}</div>
           </div>
+          ${badge(vm)}
         </div>
-      </td>
-      <td data-bot-status>${statusPill(bot.status)}</td>
-      <td class="num hide-sm" data-bot-cpu>${running ? fmtPct(bot.cpu) + '%' : '—'}</td>
-      <td class="num hide-sm" data-bot-mem>${running ? fmtBytes(bot.mem) : '—'}</td>
-      <td class="num hide-sm" data-bot-uptime>${running ? fmtDuration(bot.uptime) : '—'}</td>
-      <td data-bot-actions>${botRowActions(bot)}</td>
-    </tr>`;
-}
-
-function botsTableHtml(bots) {
-  return `<div class="table-wrap"><table class="table">
-    <thead><tr>
-      <th>Bot</th><th>Status</th><th class="hide-sm">CPU</th><th class="hide-sm">RAM</th>
-      <th class="hide-sm">Uptime</th><th class="right">Actions</th>
-    </tr></thead>
-    <tbody id="ov-bots-body" data-ids="${bots.map((bot) => bot.id).join(',')}">${bots.map(botRowHtml).join('')}</tbody>
-  </table></div>`;
-}
-
-function emptyBotsHtml() {
-  return `<div class="empty">
-    <div class="empty-icon">${icon('box', 'lg')}</div>
-    <h3>No bots yet</h3>
-    <p>Create a bot and BotDeck runs it directly on this VPS —<br>no Docker, no containers, just processes.</p>
-    <button class="btn primary" data-action="new-bot">${icon('plus')} Create your first bot</button>
-  </div>`;
-}
-
-function renderOverview() {
-  const ov = state.overview;
-  const system = ov && ov.system;
-  const counts = (ov && ov.counts) || { total: 0, running: 0 };
-
-  renderTopbar({
-    title: 'Overview',
-    subtitle: system
-      ? `${esc(system.hostname)} · ${system.cores} vCPU · ${esc(system.cpuModel)}`
-      : 'Loading system information…',
-    actions: `<button class="btn primary" data-action="new-bot">${icon('plus')} New bot</button>`
-  });
-
-  const memPct = system ? pct(system.memory.total - system.memory.free, system.memory.total) : 0;
-  const diskPct = system && system.disk ? pct(system.disk.used, system.disk.total) : 0;
-
-  $('#content').innerHTML = `
-    <div class="content-inner view-enter">
-      <div class="stat-grid">
-        <div class="stat">
-          <div class="stat-top"><span class="stat-label">Bots</span><span class="stat-icon">${icon('box', 'sm')}</span></div>
-          <div class="stat-value"><span id="ov-running">${counts.running}</span><span class="unit">/ ${counts.total} running</span></div>
-          <div class="stat-sub" id="ov-bots-sub">${counts.stopped} stopped · ${counts.crashed} crashed</div>
+        <div class="vm-meta">
+          <span class="badge">${vm.cpu} vCPU</span>
+          <span class="badge">${vm.memMB} MB RAM</span>
+          <span class="badge">${vm.diskGB} GB disk</span>
+          ${vm.autostart ? '<span class="badge blue">autostart</span>' : ''}
         </div>
-        <div class="stat">
-          <div class="stat-top"><span class="stat-label">CPU load</span><span class="stat-icon">${icon('cpu', 'sm')}</span></div>
-          <div class="stat-value"><span id="ov-cpu">${system ? fmtPct(system.cpu) : '—'}</span><span class="unit">%</span></div>
-          <div class="stat-sub" id="ov-load">${system ? `load ${system.load1} · ${system.cores} cores` : '—'}</div>
-          <div class="meter"><i id="ov-cpu-bar" style="width:${system ? system.cpu : 0}%"></i></div>
+        <div class="vm-actions">
+          <button class="primary sm" data-act="open">Open</button>
+          ${
+            vm.status && vm.status.running
+              ? '<button class="sm" data-act="stop">Stop</button><button class="sm" data-act="console">Console</button>'
+              : '<button class="sm" data-act="start">Start</button>'
+          }
+          <button class="sm ghost" data-act="ssh" title="SSH details">SSH</button>
+          <button class="sm ghost danger" data-act="delete" title="Delete">✕</button>
         </div>
-        <div class="stat">
-          <div class="stat-top"><span class="stat-label">Memory</span><span class="stat-icon">${icon('mem', 'sm')}</span></div>
-          <div class="stat-value"><span id="ov-mem">${system ? fmtBytes(system.memory.total - system.memory.free) : '—'}</span></div>
-          <div class="stat-sub" id="ov-mem-sub">${system ? `of ${fmtBytes(system.memory.total)} · bots ${fmtBytes(ov.botMemory)}` : '—'}</div>
-          <div class="meter"><i id="ov-mem-bar" style="width:${memPct}%" class="${memPct > 90 ? 'crit' : memPct > 75 ? 'warn' : ''}"></i></div>
-        </div>
-        <div class="stat">
-          <div class="stat-top"><span class="stat-label">Disk</span><span class="stat-icon">${icon('disk', 'sm')}</span></div>
-          <div class="stat-value"><span id="ov-disk">${system && system.disk ? fmtBytes(system.disk.used) : '—'}</span></div>
-          <div class="stat-sub" id="ov-disk-sub">${system && system.disk ? `of ${fmtBytes(system.disk.total)} · ${fmtBytes(system.disk.free)} free` : 'not available'}</div>
-          <div class="meter"><i id="ov-disk-bar" style="width:${diskPct}%" class="${diskPct > 90 ? 'crit' : diskPct > 75 ? 'warn' : ''}"></i></div>
-        </div>
-      </div>
-
-      <div class="dash-grid">
-        <div class="card">
-          <div class="card-head">
-            <h3>${icon('activity', 'sm')} Bots</h3>
-            <div class="right">
-              <button class="btn xs ghost" data-action="bulk" data-op="start-all">${icon('play', 'xs')} Start all</button>
-              <button class="btn xs ghost" data-action="bulk" data-op="stop-all">${icon('stop', 'xs')} Stop all</button>
-            </div>
-          </div>
-          <div class="card-body tight">
-            <div id="ov-bots-holder">${state.bots.length ? botsTableHtml(state.bots) : emptyBotsHtml()}</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><h3>${icon('server', 'sm')} System</h3>
-            <div class="right"><span class="chip green" id="conn-chip"><span class="status-dot running" style="width:6px;height:6px"></span> <span id="conn-state">live</span></span></div>
-          </div>
-          <div class="info-list" id="ov-system-list">
-            ${systemInfoHtml(system, ov)}
-          </div>
-        </div>
-      </div>
-    </div>`;
-
-  syncBotsView();
-}
-
-function systemInfoHtml(system, ov) {
-  if (!system) return `<div class="info-row"><span class="k">Loading…</span></div>`;
-  const rows = [
-    ['server', 'Hostname', system.hostname],
-    ['cpu', 'OS', `${system.platform} ${system.release}`],
-    ['zap', 'Load (1/5/15)', `${system.load1} / ${system.load5} / ${system.load15}`],
-    ['clock', 'Server uptime', fmtDuration(system.uptime * 1000)],
-    ['code', 'Node.js', system.nodeVersion],
-    ['activity', 'Panel uptime', fmtDuration(system.panel.uptime * 1000)],
-    ['folder', 'Bots folder', ov && ov.dirs ? ov.dirs.bots : '—'],
-    ['disk', 'Data folder', ov && ov.dirs ? ov.dirs.data : '—']
-  ];
-  return rows
-    .map(
-      ([ic, key, value]) => `
-      <div class="info-row">
-        <span class="k">${icon(ic, 'xs')} ${esc(key)}</span>
-        <span class="v mono" title="${esc(value)}">${esc(value)}</span>
       </div>`
-    )
-    .join('');
-}
+      )
+      .join('');
 
-function syncBotsView() {
-  const ov = state.overview;
-  if (!ov) return;
-  syncSidebar();
-  syncFooter();
-
-  if (state.route.name === 'overview') {
-    const counts = ov.counts || {};
-    const system = ov.system || null;
-    const runningEl = $('#ov-running');
-    if (runningEl) runningEl.textContent = String(counts.running || 0);
-    const sub = $('#ov-bots-sub');
-    if (sub) sub.textContent = `${counts.stopped || 0} stopped · ${counts.crashed || 0} crashed`;
-    if (system) {
-      const memPct = pct(system.memory.total - system.memory.free, system.memory.total);
-      const diskPct = system.disk ? pct(system.disk.used, system.disk.total) : 0;
-      setText('#ov-cpu', fmtPct(system.cpu));
-      setText('#ov-load', `load ${system.load1} · ${system.cores} cores`);
-      setWidth('#ov-cpu-bar', system.cpu);
-      setText('#ov-mem', fmtBytes(system.memory.total - system.memory.free));
-      setText('#ov-mem-sub', `of ${fmtBytes(system.memory.total)} · bots ${fmtBytes(ov.botMemory)}`);
-      setWidth('#ov-mem-bar', memPct, memPct > 75);
-      setText('#ov-disk', system.disk ? fmtBytes(system.disk.used) : '—');
-      setText('#ov-disk-sub', system.disk ? `of ${fmtBytes(system.disk.total)} · ${fmtBytes(system.disk.free)} free` : 'not available');
-      setWidth('#ov-disk-bar', diskPct, diskPct > 75);
-      const list = $('#ov-system-list');
-      if (list) list.innerHTML = systemInfoHtml(system, ov);
-    }
-    setConnectionWarning(false);
-
-    const holder = $('#ov-bots-holder');
-    if (holder) {
-      const hasTable = Boolean($('#ov-bots-body', holder));
-      if (state.bots.length && !hasTable) holder.innerHTML = botsTableHtml(state.bots);
-      else if (!state.bots.length && hasTable) holder.innerHTML = emptyBotsHtml();
-      else if (state.bots.length) syncBotTable($('#ov-bots-body', holder), state.bots);
-    }
-  }
-
-  if (state.route.name === 'bots') {
-    renderBotsTable();
-  }
-}
-
-function setText(selector, text) {
-  const el = $(selector);
-  if (el && el.textContent !== text) el.textContent = text;
-}
-
-function setWidth(selector, value, warn = false) {
-  const el = $(selector);
-  if (!el) return;
-  el.style.width = `${Math.max(0, Math.min(100, value))}%`;
-  el.className = warn ? 'warn' : '';
-}
-
-function syncBotTable(tbody, bots) {
-  if (!tbody) return;
-  const ids = bots.map((bot) => bot.id).join(',');
-  if (tbody.dataset.ids !== ids) {
-    tbody.dataset.ids = ids;
-    tbody.innerHTML = bots.map(botRowHtml).join('');
-    return;
-  }
-  for (const bot of bots) {
-    const row = tbody.querySelector(`tr[data-bot="${bot.id}"]`);
-    if (!row) continue;
-    const running = isActiveStatus(bot.status);
-    const statusCell = row.querySelector('[data-bot-status]');
-    if (statusCell) statusCell.innerHTML = statusPill(bot.status);
-    setCell(row, '[data-bot-cpu]', running ? `${fmtPct(bot.cpu)}%` : '—');
-    setCell(row, '[data-bot-mem]', running ? fmtBytes(bot.mem) : '—');
-    setCell(row, '[data-bot-uptime]', running ? fmtDuration(bot.uptime) : '—');
-    const actions = row.querySelector('[data-bot-actions]');
-    if (actions && actions.dataset.sig !== bot.status) {
-      actions.dataset.sig = bot.status;
-      actions.innerHTML = botRowActions(bot);
-    }
-  }
-}
-
-function setCell(row, selector, text) {
-  const cell = row.querySelector(selector);
-  if (cell && cell.textContent !== text) cell.textContent = text;
-}
-
-/* ----------------------------- bots list ---------------------------- */
-
-function renderBotsView() {
-  renderTopbar({
-    title: 'All bots',
-    subtitle: `${state.bots.length} bot${state.bots.length === 1 ? '' : 's'} on this server`,
-    actions: `<button class="btn primary" data-action="new-bot">${icon('plus')} New bot</button>`
-  });
-
-  $('#content').innerHTML = `
-    <div class="content-inner view-enter">
-      <div class="row-between" style="margin-bottom:14px;gap:12px;flex-wrap:wrap">
-        <div class="search">
-          ${icon('search', 'sm')}
-          <input class="input" id="bot-search" placeholder="Search bots…" value="${esc(state.search)}">
+    const body = `
+      <div class="page-head">
+        <div>
+          <h1>Mere VPS</h1>
+          <p>${S.vms.length ? `${st.running || 0} chal rahe, ${st.total - (st.running || 0)} band` : 'Apne VPS ke andar jitne chahein virtual machines banayein'}</p>
         </div>
-        <div class="row" style="gap:8px">
-          <button class="btn sm ghost" data-action="bulk" data-op="start-all">${icon('play', 'sm')} Start all</button>
-          <button class="btn sm ghost" data-action="bulk" data-op="stop-all">${icon('stop', 'sm')} Stop all</button>
-        </div>
+        <div class="spacer"></div>
+        <button class="primary" id="btn-new">+ Naya VPS</button>
       </div>
-      <div class="card">
-        <div class="card-body tight" id="all-bots-wrap"></div>
+      ${accelWarn}
+      <div class="grid stats">
+        <div class="stat"><div class="k">VMs</div><div class="v">${st.running || 0}<span class="mute" style="font-size:15px"> / ${st.total || 0}</span></div><div class="s">chal rahe / total</div></div>
+        <div class="stat"><div class="k">Host RAM</div><div class="v">${usedPct}%</div><div class="s">${fmtBytes(mem.total - mem.free)} / ${fmtBytes(mem.total)}</div></div>
+        <div class="stat"><div class="k">CPU cores</div><div class="v">${(S.system && S.system.cpus) || '-'}</div><div class="s">load ${(S.system && S.system.load && S.system.load.load1.toFixed(2)) || '-'}</div></div>
+        <div class="stat"><div class="k">VM memory used</div><div class="v">${fmtBytes(st.rss || 0)}</div><div class="s">allocated ${fmtBytes((st.allocMem || 0) * 1048576)}</div></div>
       </div>
-    </div>`;
+      ${
+        S.vms.length
+          ? `<div class="grid vms">${cards}</div>`
+          : `<div class="empty">
+               <h3>Abhi koi VPS nahi hai</h3>
+               <p>Pehle ek OS image download karein, phir ek click me VM ban jayega.</p>
+               <button class="primary" id="btn-new2">+ Pehla VPS banayein</button>
+             </div>`
+      }`;
 
-  const search = $('#bot-search');
-  if (search) {
-    search.addEventListener('input', (event) => {
-      state.search = event.target.value;
-      renderBotsTable();
+    shell('vms', body);
+    document.querySelectorAll('#btn-new, #btn-new2').forEach((b) => (b.onclick = openCreate));
+    app.querySelectorAll('.vm-card').forEach((card) => {
+      const id = card.dataset.id;
+      card.addEventListener('click', async (e) => {
+        const btn = e.target.closest('button');
+        if (!btn) {
+          location.hash = `#/vm/${id}`;
+          return;
+        }
+        e.stopPropagation();
+        const act = btn.dataset.act;
+        if (act === 'open') return (location.hash = `#/vm/${id}`);
+        if (act === 'console') return (location.hash = `#/vm/${id}`);
+        if (act === 'ssh') return showSsh(id);
+        if (act === 'start') return quickAction(id, 'start', btn);
+        if (act === 'stop') return quickAction(id, 'stop', btn);
+        if (act === 'delete') return confirmDelete(id);
+      });
     });
-  }
-  renderBotsTable();
-}
 
-function filteredBots() {
-  const term = state.search.trim().toLowerCase();
-  if (!term) return state.bots;
-  return state.bots.filter(
-    (bot) =>
-      bot.name.toLowerCase().includes(term) ||
-      String(bot.runtime).toLowerCase().includes(term) ||
-      String(bot.entry || '').toLowerCase().includes(term)
-  );
-}
+    startPolling(() => viewVms().catch(() => {}), 6000);
+  }
 
-function renderBotsTable() {
-  const wrap = $('#all-bots-wrap');
-  if (!wrap) return;
-  const bots = filteredBots();
-  if (!state.bots.length) {
-    wrap.innerHTML = emptyBotsHtml();
-    return;
+  function startPolling(fn, ms) {
+    stopPolling();
+    S.pollTimer = setInterval(() => {
+      if (!document.hidden) fn();
+    }, ms);
   }
-  if (!bots.length) {
-    wrap.innerHTML = `<div class="empty"><div class="empty-icon">${icon('search', 'lg')}</div>
-      <h3>No matching bots</h3><p>Try a different name or runtime.</p></div>`;
-    return;
-  }
-  const needsTable = !$('#all-bots-body', wrap);
-  if (needsTable) {
-    wrap.innerHTML = `<div class="table-wrap"><table class="table">
-      <thead><tr>
-        <th>Bot</th><th>Status</th><th class="hide-sm">CPU</th><th class="hide-sm">RAM</th>
-        <th class="hide-sm">Uptime</th><th class="right">Actions</th>
-      </tr></thead>
-      <tbody id="all-bots-body"></tbody>
-    </table></div>`;
-  }
-  const tbody = $('#all-bots-body', wrap);
-  const ids = bots.map((bot) => bot.id).join(',');
-  if (tbody.dataset.ids !== ids) {
-    tbody.dataset.ids = ids;
-    tbody.innerHTML = bots.map(botRowHtml).join('');
-  } else {
-    syncBotTable(tbody, bots);
-  }
-}
 
-/* --------------------------- bot detail ----------------------------- */
+  async function quickAction(id, action, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      await api(`/api/vms/${id}/${action}`, { method: 'POST' });
+      toast(action === 'start' ? 'VM start ho raha hai…' : 'VM stop ho raha hai…', 'ok');
+      if (S.route.name === 'vms') await viewVms();
+      else if (S.route.name === 'vm') await viewVm(id, { keepTerm: true });
+    } catch (e) {
+      toast(e.message, 'err');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
 
-function renderBotView() {
-  const bot = botById(state.route.id);
-  if (!bot) {
-    if (!state.overview) {
-      $('#content').innerHTML = `<div class="content-inner"><div class="card"><div class="empty">
-        <div class="empty-icon">${icon('refresh', 'lg')}</div><h3>Loading bot…</h3></div></div></div>`;
+  async function showSsh(id) {
+    try {
+      const d = await api(`/api/vms/${id}/ssh`);
+      modal({
+        title: 'SSH access',
+        sub: `${d.user}@${d.host} — port ${d.port}`,
+        body: `
+          <div class="hint-box">Ye port VPS ke <b>localhost</b> par khula hai. Laptop se connect karne ke liye pehle tunnel banayein:
+            <div class="mt16 mono-code" style="display:block;padding:8px">ssh -L ${d.port}:127.0.0.1:${d.port} root@${esc(d.host)}</div>
+            phir: <span class="mono-code">ssh -p ${d.port} ${esc(d.user)}@127.0.0.1</span>
+          </div>
+          <div class="kv">
+            <div class="item"><div class="k">Command</div><div class="v">${esc(d.command)}</div></div>
+            <div class="item"><div class="k">User</div><div class="v">${esc(d.user)}</div></div>
+            <div class="item"><div class="k">Password</div><div class="v">${esc(d.password || '—')}</div></div>
+          </div>
+          <div class="hint-box warn mt16">Agar aapka VPS internet par direct nahi hai (NAT ke peeche), to browser console hi sabse aasan raasta hai.</div>`,
+        okText: 'Band karein'
+      });
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  }
+
+  async function confirmDelete(id) {
+    const vm = S.vms.find((v) => v.id === id) || S.vm;
+    const ok = await confirmDialog({
+      title: 'VM delete karein?',
+      sub: `${vm ? vm.name : id} ka poora disk aur data hamesha ke liye chala jayega.`,
+      okText: 'Delete',
+      danger: true
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/vms/${id}`, { method: 'DELETE' });
+      toast('VM delete ho gaya', 'ok');
+      if (S.term) {
+        S.term.close();
+        S.term = null;
+      }
+      location.hash = '#/';
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  }
+
+  // ---------------- create modal ----------------
+  async function openCreate() {
+    try {
+      S.images = await api('/api/images');
+    } catch (e) {
+      return toast(e.message, 'err');
+    }
+    const installed = S.images.images.filter((i) => i.exists);
+    if (!installed.length) {
+      const ok = await confirmDialog({
+        title: 'Pehle OS image chahiye',
+        sub: 'VM banane ke liye ek base image download karna hoga (Ubuntu ~300MB). Images page par jayein?',
+        okText: 'Images page kholo'
+      });
+      if (ok) location.hash = '#/images';
       return;
     }
-    renderTopbar({ title: 'Bot not found', subtitle: 'It may have been deleted', back: true });
-    $('#content').innerHTML = `<div class="content-inner"><div class="card"><div class="empty">
-      <div class="empty-icon">${icon('alert', 'lg')}</div>
-      <h3>This bot no longer exists</h3><p>It was deleted from the panel.</p>
-      <a class="btn primary" href="#/bots">Back to bots</a></div></div></div>`;
-    return;
-  }
-
-  renderTopbar({
-    title: bot.name,
-    subtitle: `${esc(bot.runtime)} · ${esc(bot.entry || '—')}`,
-    back: true,
-    actions: `<button class="btn sm ghost" data-action="new-bot">${icon('plus', 'sm')} <span class="hide-sm">New bot</span></button>`
-  });
-
-  const tab = state.route.tab || 'console';
-  if (state.lastRenderedBotId === bot.id && state.lastRenderedTab === tab) {
-    syncBotLive();
-    return;
-  }
-  const previousBotId = state.lastRenderedBotId;
-  state.lastRenderedBotId = bot.id;
-  state.lastRenderedTab = tab;
-  if (previousBotId !== bot.id) state.filePath = '';
-
-  const running = isActiveStatus(bot.status);
-
-  $('#content').innerHTML = `
-    <div class="content-inner view-enter">
-      <div class="bot-hero">
-        <span class="bot-avatar">${esc(initials(bot.name))}</span>
-        <div class="bot-hero-title">
-          <h2>${esc(bot.name)} <span id="bot-status-pill">${statusPill(bot.status)}</span></h2>
-          <div class="meta">
-            <span class="chip">${icon('code', 'xs')} ${esc(bot.runtime)}</span>
-            <span class="dot-sep"></span>
-            <span id="bot-meta-pid">${bot.pid ? 'pid ' + bot.pid : 'not running'}</span>
-            <span class="dot-sep"></span>
-            <span id="bot-meta-uptime">${running ? 'up ' + fmtDuration(bot.uptime) : 'stopped'}</span>
-            ${bot.port ? `<span class="dot-sep"></span><a class="chip accent" target="_blank" rel="noopener" href="http://${location.hostname}:${bot.port}">${icon('globe', 'xs')} port ${bot.port}</a>` : ''}
-          </div>
-        </div>
-        <div class="bot-hero-actions" id="bot-actions" data-status="${esc(bot.status)}">${botActionsHtml(bot)}</div>
-      </div>
-
-      <div class="tabs">
-        <a class="tab ${tab === 'console' ? 'active' : ''}" href="#/bot/${bot.id}/console">${icon('terminal', 'sm')} Console</a>
-        <a class="tab ${tab === 'files' ? 'active' : ''}" href="#/bot/${bot.id}/files">${icon('folder', 'sm')} Files</a>
-        <a class="tab ${tab === 'settings' ? 'active' : ''}" href="#/bot/${bot.id}/settings">${icon('settings', 'sm')} Settings</a>
-      </div>
-
-      <div id="bot-tab-content"></div>
-    </div>`;
-
-  const host = $('#bot-tab-content');
-
-  if (tab === 'console') initConsole(bot, host);
-  else {
-    closeStream();
-    if (tab === 'files') initFiles(bot, host);
-    else initBotSettings(bot, host);
-  }
-}
-
-function botActionsHtml(bot) {
-  const running = isActiveStatus(bot.status);
-  if (!running) {
-    return `<button class="btn primary" data-action="bot-op" data-bot="${bot.id}" data-op="start">${icon('play', 'sm')} Start</button>`;
-  }
-  return `
-    <button class="btn ghost" data-action="bot-op" data-bot="${bot.id}" data-op="restart">${icon('restart', 'sm')} Restart</button>
-    <button class="btn danger" data-action="bot-op" data-bot="${bot.id}" data-op="stop">${icon('stop', 'sm')} Stop</button>`;
-}
-
-function syncBotLive() {
-  const bot = botById(state.route.id);
-  if (!bot) return;
-  const running = isActiveStatus(bot.status);
-
-  const pill = $('#bot-status-pill');
-  if (pill) pill.innerHTML = statusPill(bot.status);
-
-  setText('#bot-meta-pid', bot.pid ? `pid ${bot.pid}` : 'not running');
-  setText('#bot-meta-uptime', running ? `up ${fmtDuration(bot.uptime)}` : 'stopped');
-
-  const actions = $('#bot-actions');
-  if (actions && actions.dataset.status !== bot.status) {
-    actions.dataset.status = bot.status;
-    actions.innerHTML = botActionsHtml(bot);
-  }
-
-  const dot = $('#live-dot');
-  if (dot) {
-    dot.className = `live-dot ${bot.status === 'running' ? 'on' : bot.status === 'crashed' ? 'err' : ''}`;
-  }
-  setText('#console-status-text', bot.status === 'running' ? 'live output' : bot.status);
-  const pidChip = $('#console-pid');
-  if (pidChip) pidChip.textContent = bot.pid ? `pid ${bot.pid}` : 'no pid';
-  const input = $('#console-input');
-  if (input) input.disabled = bot.status !== 'running';
-
-  setText('#console-cpu', running ? `cpu ${fmtPct(bot.cpu)}%` : 'cpu —');
-  setText('#console-mem', running ? `ram ${fmtBytes(bot.mem)}` : 'ram —');
-  setText('#files-host-path', bot.dir || '');
-}
-
-/* ----------------------------- console ------------------------------ */
-
-function initConsole(bot, host) {
-  host.innerHTML = `
-    <div class="card console-card">
-      <div class="console-bar">
-        <div class="console-status">
-          <span class="live-dot ${bot.status === 'running' ? 'on' : ''}" id="live-dot"></span>
-          <span id="console-status-text">${esc(bot.status === 'running' ? 'live output' : bot.status)}</span>
-        </div>
-        <span class="chip mono" id="console-pid">${bot.pid ? 'pid ' + bot.pid : 'no pid'}</span>
-        <span class="chip mono hide-sm" id="console-cpu">cpu —</span>
-        <span class="chip mono hide-sm" id="console-mem">ram —</span>
-        <div class="spacer"></div>
-        <label class="switch hide-sm" title="Automatically scroll to newest line">
-          <input type="checkbox" id="autoscroll-toggle" ${state.autoscroll ? 'checked' : ''}>
-          <span class="track"></span>
-          <span class="label">Auto-scroll</span>
-        </label>
-        <button class="btn sm ghost" data-action="download-logs" data-bot="${bot.id}">${icon('download', 'sm')} <span class="hide-sm">Download</span></button>
-        <button class="btn sm ghost" data-action="clear-logs" data-bot="${bot.id}">${icon('trash', 'sm')} <span class="hide-sm">Clear</span></button>
-      </div>
-      <div class="terminal" id="terminal">
-        <div class="console-empty">
-          ${icon('terminal', 'lg')}
-          <div>No output yet.<br><span style="font-size:12px;opacity:.7">Start the bot to see live logs here.</span></div>
-        </div>
-      </div>
-      <form class="console-input" id="console-form" data-bot="${bot.id}">
-        <span class="prompt">›</span>
-        <input id="console-input" placeholder="Send a line to the bot's stdin…" autocomplete="off" spellcheck="false" ${bot.status === 'running' ? '' : 'disabled'}>
-        <button class="btn sm primary" type="submit" ${bot.status === 'running' ? '' : 'disabled'}>Send</button>
-      </form>
-    </div>
-    <div class="hint-box" style="margin-top:12px">
-      ${icon('terminal', 'sm')}
-      <div>Live console streams straight from the bot process. Logs are also written to <span class="mono">data/logs/${esc(bot.id)}.log</span> on the server.</div>
-    </div>`;
-
-  const toggle = $('#autoscroll-toggle');
-  if (toggle) {
-    toggle.addEventListener('change', () => {
-      state.autoscroll = toggle.checked;
-      localStorage.setItem('bd_autoscroll', state.autoscroll ? '1' : '0');
-      if (state.autoscroll) scrollTerminal();
-    });
-  }
-
-  loadLogs(bot.id).then(() => openStream(bot.id));
-}
-
-async function loadLogs(botId) {
-  const term = $('#terminal');
-  if (!term) return;
-  try {
-    const data = await api(`/api/bots/${botId}/logs?lines=400`);
-    if (!data || !data.logs) return;
-    const current = $('#terminal');
-    if (!current) return;
-    current.innerHTML = '';
-    for (const entry of data.logs) appendLog(entry, false);
-    if (!data.logs.length) showConsoleEmpty();
-    scrollTerminal();
-  } catch (err) {
-    if (!err.isAuth) console.warn(err);
-  }
-}
-
-function showConsoleEmpty() {
-  const term = $('#terminal');
-  if (!term || term.children.length) return;
-  term.innerHTML = `<div class="console-empty">${icon('terminal', 'lg')}
-    <div>No output yet.<br><span style="font-size:12px;opacity:.7">Start the bot to see live logs here.</span></div></div>`;
-}
-
-function appendLog(entry, autoscroll = true) {
-  const term = $('#terminal');
-  if (!term) return;
-  const empty = $('.console-empty', term);
-  if (empty) empty.remove();
-
-  const line = document.createElement('div');
-  const kind = entry.s === 'err' ? 'err' : entry.s === 'sys' ? 'sys' : 'out';
-  line.className = `log-line ${kind}`;
-  const time = entry.t ? `<span class="ts">${new Date(entry.t).toLocaleTimeString('en-GB')}</span>` : '';
-  line.innerHTML = time + ansiToHtml(entry.m == null ? '' : entry.m);
-  term.appendChild(line);
-
-  while (term.children.length > MAX_DOM_LOGS) term.removeChild(term.firstChild);
-  if (autoscroll && state.autoscroll) scrollTerminal();
-}
-
-function scrollTerminal() {
-  const term = $('#terminal');
-  if (term) term.scrollTop = term.scrollHeight;
-}
-
-function openStream(botId) {
-  closeStream();
-  if (!state.token) return;
-  const source = new EventSource(`/api/bots/${botId}/stream?token=${encodeURIComponent(state.token)}`);
-  state.stream = source;
-  state.streamBotId = botId;
-
-  source.addEventListener('open', () => {
-    const dot = $('#live-dot');
-    const bot = botById(botId);
-    if (dot && bot && bot.status === 'running') dot.className = 'live-dot on';
-  });
-
-  source.addEventListener('log', (event) => {
-    try {
-      appendLog(JSON.parse(event.data));
-    } catch (_) { /* ignore */ }
-  });
-
-  source.addEventListener('status', (event) => {
-    try {
-      const payload = JSON.parse(event.data);
-      handleStatusEvent(botId, payload);
-    } catch (_) { /* ignore */ }
-  });
-
-  source.addEventListener('error', () => {
-    const dot = $('#live-dot');
-    if (dot) dot.className = 'live-dot err';
-  });
-}
-
-function handleStatusEvent(botId, payload) {
-  const dot = $('#live-dot');
-  if (dot) dot.className = `live-dot ${payload.status === 'running' ? 'on' : payload.status === 'crashed' ? 'err' : ''}`;
-
-  const bot = botById(botId);
-  if (bot) {
-    if (payload.pid !== undefined) bot.pid = payload.pid;
-    bot.status = payload.status;
-    syncBotLive();
-    syncSidebar();
-  }
-  setText('#console-status-text', payload.status);
-  const input = $('#console-input');
-  if (input) input.disabled = payload.status !== 'running';
-  const sendButton = $('#console-form button[type=submit]');
-  if (sendButton) sendButton.disabled = payload.status !== 'running';
-
-  const pill = $('#bot-status-pill');
-  if (pill) pill.innerHTML = statusPill(payload.status);
-}
-
-function closeStream() {
-  if (state.stream) {
-    try { state.stream.close(); } catch (_) { /* ignore */ }
-  }
-  state.stream = null;
-  state.streamBotId = null;
-}
-
-/* ------------------------------ files ------------------------------- */
-
-const CODE_EXT = new Set([
-  '.js', '.mjs', '.cjs', '.ts', '.jsx', '.tsx', '.py', '.sh', '.bash', '.json', '.yml', '.yaml',
-  '.toml', '.ini', '.conf', '.env', '.txt', '.md', '.html', '.css', '.java', '.go', '.rs', '.rb',
-  '.php', '.c', '.h', '.cpp', '.cs', '.sql', '.xml', '.lua', '.pl'
-]);
-const ARCHIVE_EXT = ['.zip', '.tar', '.tar.gz', '.tgz'];
-
-function fileKind(name, type) {
-  if (type === 'dir') return 'dir';
-  const lower = name.toLowerCase();
-  if (ARCHIVE_EXT.some((ext) => lower.endsWith(ext))) return 'archive';
-  const ext = lower.slice(lower.lastIndexOf('.'));
-  const base = lower.startsWith('.') ? lower : name.toLowerCase();
-  if (base === '.env' || CODE_EXT.has(ext)) return 'code';
-  return 'file';
-}
-
-function initFiles(bot, host) {
-  host.innerHTML = `
-    <div class="card">
-      <div class="files-toolbar">
-        <div class="crumbs" id="crumbs"></div>
-        <div class="spacer"></div>
-        <button class="btn sm ghost" data-action="files-refresh" data-bot="${bot.id}" title="Refresh">${icon('refresh', 'sm')}</button>
-        <button class="btn sm ghost" data-action="files-new-folder" data-bot="${bot.id}">${icon('folder-plus', 'sm')} <span class="hide-sm">Folder</span></button>
-        <button class="btn sm ghost" data-action="files-new-file" data-bot="${bot.id}">${icon('file-plus', 'sm')} <span class="hide-sm">File</span></button>
-        <button class="btn sm primary" data-action="files-upload" data-bot="${bot.id}">${icon('upload', 'sm')} Upload</button>
-      </div>
-      <div class="card-body tight files-drop" id="files-drop">
-        <div class="table-wrap">
-          <table class="table">
-            <thead><tr><th>Name</th><th class="hide-sm">Size</th><th class="hide-sm">Modified</th><th class="right">Actions</th></tr></thead>
-            <tbody id="files-body">
-              <tr><td colspan="4"><div class="empty" style="padding:28px">Loading files…</div></td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-      <div class="console-bar" style="border-top:1px solid var(--border-soft);border-bottom:none">
-        <span class="muted small">${icon('folder', 'xs')} <span class="mono" id="files-host-path">${esc(bot.dir || '')}</span></span>
-      </div>
-    </div>
-    <div class="hint-box" style="margin-top:12px">
-      ${icon('upload', 'sm')}
-      <div>Drag &amp; drop files anywhere on this panel to upload. Archives (.zip, .tar.gz) can be extracted with the archive button.</div>
-    </div>`;
-
-  const drop = $('#files-drop');
-  if (drop) {
-    drop.addEventListener('dragover', (event) => {
-      event.preventDefault();
-      drop.classList.add('dragover');
-    });
-    drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
-    drop.addEventListener('drop', (event) => {
-      event.preventDefault();
-      drop.classList.remove('dragover');
-      const files = Array.from(event.dataTransfer.files || []);
-      if (files.length) uploadFiles(bot.id, state.filePath, files);
-    });
-  }
-
-  loadFiles(bot.id, state.filePath);
-}
-
-async function loadFiles(botId, path = '') {
-  state.filePath = String(path || '').replace(/^\/+/, '');
-  renderCrumbs();
-  const tbody = $('#files-body');
-  if (!tbody) return;
-  try {
-    const data = await api(`/api/bots/${botId}/files?path=${encodeURIComponent(state.filePath)}`);
-    renderFileRows(data.items || []);
-  } catch (err) {
-    if (err.isAuth) return;
-    tbody.innerHTML = `<tr><td colspan="4"><div class="empty">
-      <div class="empty-icon">${icon('alert', 'lg')}</div><h3>Could not load files</h3><p>${esc(err.message)}</p></div></td></tr>`;
-  }
-}
-
-function renderCrumbs() {
-  const container = $('#crumbs');
-  if (!container) return;
-  const parts = state.filePath.split('/').filter(Boolean);
-  let accumulated = '';
-  const botId = state.route.id;
-  const items = [
-    `<span class="crumb ${parts.length ? '' : 'current'}" data-action="files-open-dir" data-bot="${botId}" data-path="">${icon('folder', 'sm')} bot</span>`
-  ];
-  for (let i = 0; i < parts.length; i++) {
-    accumulated = accumulated ? `${accumulated}/${parts[i]}` : parts[i];
-    const current = i === parts.length - 1;
-    items.push('<span class="crumb-sep">/</span>');
-    items.push(
-      `<span class="crumb ${current ? 'current' : ''}" data-action="files-open-dir" data-bot="${botId}" data-path="${esc(accumulated)}">${esc(parts[i])}</span>`
-    );
-  }
-  container.innerHTML = items.join('');
-}
-
-function renderFileRows(items) {
-  const tbody = $('#files-body');
-  if (!tbody) return;
-
-  const rows = [];
-  if (state.filePath) {
-    const parent = dirname(state.filePath);
-    rows.push(`
-      <tr data-action="files-open-dir" data-bot="${state.route.id}" data-path="${esc(parent)}">
-        <td><div class="file-row"><span class="file-icon dir">${icon('arrow-left', 'sm')}</span>
-          <div><div class="bot-name">..</div><div class="bot-meta">parent folder</div></div></div></td>
-        <td class="hide-sm">—</td><td class="hide-sm">—</td><td></td>
-      </tr>`);
-  }
-
-  for (const item of items) {
-    const kind = fileKind(item.name, item.type);
-    const isArchive = kind === 'archive';
-    rows.push(`
-      <tr>
-        <td>
-          <div class="file-row">
-            <span class="file-icon ${kind}">${icon(item.type === 'dir' ? 'folder' : isArchive ? 'box' : 'file', 'sm')}</span>
-            <div style="min-width:0">
-              <div class="bot-name">${
-                item.type === 'dir'
-                  ? `<span style="cursor:pointer" data-action="files-open-dir" data-bot="${state.route.id}" data-path="${esc(item.path)}">${esc(item.name)}</span>`
-                  : `<span style="cursor:pointer" data-action="files-edit" data-bot="${state.route.id}" data-path="${esc(item.path)}">${esc(item.name)}</span>`
-              }</div>
-              <div class="bot-meta">${item.type === 'dir' ? 'folder' : esc(item.type)}</div>
-            </div>
-          </div>
-        </td>
-        <td class="num hide-sm" style="cursor:default">${item.type === 'dir' ? '—' : fmtBytes(item.size)}</td>
-        <td class="muted small hide-sm">${item.mtime ? new Date(item.mtime).toLocaleString() : '—'}</td>
-        <td>
-          <div class="actions">
-            ${isArchive ? `<button class="icon-btn" data-action="files-extract" data-bot="${state.route.id}" data-path="${esc(item.path)}" title="Extract here">${icon('box')}</button>` : ''}
-            ${item.type === 'file' ? `<button class="icon-btn" data-action="files-edit" data-bot="${state.route.id}" data-path="${esc(item.path)}" title="Edit">${icon('edit')}</button>
-            <button class="icon-btn" data-action="files-download" data-bot="${state.route.id}" data-path="${esc(item.path)}" title="Download">${icon('download')}</button>` : ''}
-            <button class="icon-btn" data-action="files-rename" data-bot="${state.route.id}" data-path="${esc(item.path)}" title="Rename">${icon('text')}</button>
-            <button class="icon-btn danger" data-action="files-delete" data-bot="${state.route.id}" data-path="${esc(item.path)}" title="Delete">${icon('trash')}</button>
-          </div>
-        </td>
-      </tr>`);
-  }
-
-  if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="4"><div class="empty">
-      <div class="empty-icon">${icon('folder', 'lg')}</div>
-      <h3>This folder is empty</h3><p>Upload your bot files or create a new file to get started.</p>
-      <button class="btn primary" data-action="files-upload" data-bot="${state.route.id}">${icon('upload')} Upload files</button>
-    </div></td></tr>`;
-    return;
-  }
-  tbody.innerHTML = rows.join('');
-}
-
-async function uploadFiles(botId, dir, files) {
-  if (!files || !files.length) return;
-  let uploaded = 0;
-  for (const file of files) {
-    try {
-      const url = `/api/bots/${botId}/files/upload?path=${encodeURIComponent(dir || '')}&name=${encodeURIComponent(file.name)}`;
-      await api(url, { method: 'PUT', body: file });
-      uploaded++;
-    } catch (err) {
-      if (err.isAuth) return;
-      toast(`Upload failed for ${file.name}: ${err.message}`, 'error');
-    }
-  }
-  if (uploaded) toast(`${uploaded} file${uploaded === 1 ? '' : 's'} uploaded`, 'success');
-  loadFiles(botId, dir);
-}
-
-async function openEditor(botId, filePath) {
-  let data;
-  try {
-    data = await api(`/api/bots/${botId}/files/read?path=${encodeURIComponent(filePath)}`);
-  } catch (err) {
-    if (err.isAuth) return;
-    toast(err.message, 'error');
-    return;
-  }
-
-  const modal = openModal({
-    title: basename(filePath),
-    subtitle: `${fmtBytes(data.size)} · ${esc(filePath)}`,
-    wide: true,
-    body: `
-      <div class="editor-meta">
-        <span class="chip">UTF-8</span>
-        <span class="chip">${icon('edit', 'xs')} editing</span>
-        <span class="spacer grow"></span>
-        <span><span class="kbd">Ctrl</span> + <span class="kbd">S</span> to save</span>
-      </div>
-      <textarea class="editor-area mono" id="editor-area" spellcheck="false"></textarea>`,
-    footer: `<button class="btn ghost" data-action="close-modal">Cancel</button>
-      <div class="right"><button class="btn primary" id="editor-save">${icon('save', 'sm')} Save file</button></div>`
-  });
-
-  const area = $('#editor-area', modal);
-  area.value = data.content;
-
-  const save = async () => {
-    const button = $('#editor-save', modal);
-    if (button) button.disabled = true;
-    try {
-      await api(`/api/bots/${botId}/files/write?path=${encodeURIComponent(filePath)}`, {
-        method: 'PUT',
-        body: { content: area.value }
-      });
-      toast('File saved', 'success');
-      closeModal();
-      loadFiles(botId, state.filePath);
-    } catch (err) {
-      if (!err.isAuth) toast(err.message, 'error');
-      if (button) button.disabled = false;
-    }
-  };
-
-  $('#editor-save', modal).addEventListener('click', save);
-  area.addEventListener('keydown', (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
-      event.preventDefault();
-      save();
-    }
-    if (event.key === 'Tab') {
-      event.preventDefault();
-      const start = area.selectionStart;
-      const end = area.selectionEnd;
-      area.value = area.value.slice(0, start) + '  ' + area.value.slice(end);
-      area.selectionStart = area.selectionEnd = start + 2;
-    }
-  });
-}
-
-function newFileDialog(botId) {
-  const modal = openModal({
-    title: 'New file',
-    subtitle: state.filePath ? `in /${state.filePath}` : 'in bot root',
-    body: `<div class="field"><label>File name</label>
-      <input class="input mono" id="new-file-name" placeholder="index.js" autocomplete="off"></div>
-      <div class="hint" style="margin-top:8px">Nested paths are allowed, e.g. <span class="mono">src/main.py</span>.</div>`,
-    footer: `<button class="btn ghost" data-action="close-modal">Cancel</button>
-      <div class="right"><button class="btn primary" id="new-file-create">${icon('plus', 'sm')} Create</button></div>`
-  });
-
-  const input = $('#new-file-name', modal);
-  const create = async () => {
-    const name = input.value.trim();
-    if (!name) return toast('Enter a file name', 'error');
-    const full = state.filePath ? `${state.filePath}/${name}` : name;
-    try {
-      await api(`/api/bots/${botId}/files/write?path=${encodeURIComponent(full)}`, {
-        method: 'PUT',
-        body: { content: '' }
-      });
-      closeModal();
-      toast('File created', 'success');
-      await loadFiles(botId, state.filePath);
-      openEditor(botId, full);
-    } catch (err) {
-      if (!err.isAuth) toast(err.message, 'error');
-    }
-  };
-  $('#new-file-create', modal).addEventListener('click', create);
-  input.addEventListener('keydown', (event) => event.key === 'Enter' && create());
-}
-
-function newFolderDialog(botId) {
-  const modal = openModal({
-    title: 'New folder',
-    subtitle: state.filePath ? `in /${state.filePath}` : 'in bot root',
-    body: `<div class="field"><label>Folder name</label>
-      <input class="input mono" id="new-folder-name" placeholder="data" autocomplete="off"></div>`,
-    footer: `<button class="btn ghost" data-action="close-modal">Cancel</button>
-      <div class="right"><button class="btn primary" id="new-folder-create">${icon('plus', 'sm')} Create</button></div>`
-  });
-  const input = $('#new-folder-name', modal);
-  const create = async () => {
-    const name = input.value.trim();
-    if (!name) return toast('Enter a folder name', 'error');
-    try {
-      await api(`/api/bots/${botId}/files/mkdir`, {
-        method: 'POST',
-        body: { path: state.filePath ? `${state.filePath}/${name}` : name }
-      });
-      closeModal();
-      toast('Folder created', 'success');
-      loadFiles(botId, state.filePath);
-    } catch (err) {
-      if (!err.isAuth) toast(err.message, 'error');
-    }
-  };
-  $('#new-folder-create', modal).addEventListener('click', create);
-  input.addEventListener('keydown', (event) => event.key === 'Enter' && create());
-}
-
-function renameDialog(botId, filePath) {
-  const modal = openModal({
-    title: 'Rename',
-    subtitle: filePath,
-    body: `<div class="field"><label>New name</label>
-      <input class="input mono" id="rename-input" value="${esc(basename(filePath))}" autocomplete="off"></div>`,
-    footer: `<button class="btn ghost" data-action="close-modal">Cancel</button>
-      <div class="right"><button class="btn primary" id="rename-save">${icon('save', 'sm')} Rename</button></div>`
-  });
-  const input = $('#rename-input', modal);
-  input.select();
-  const save = async () => {
-    const name = input.value.trim();
-    if (!name) return toast('Enter a name', 'error');
-    const target = dirname(filePath) ? `${dirname(filePath)}/${name}` : name;
-    try {
-      await api(`/api/bots/${botId}/files/rename`, { method: 'POST', body: { from: filePath, to: target } });
-      closeModal();
-      toast('Renamed', 'success');
-      loadFiles(botId, state.filePath);
-    } catch (err) {
-      if (!err.isAuth) toast(err.message, 'error');
-    }
-  };
-  $('#rename-save', modal).addEventListener('click', save);
-  input.addEventListener('keydown', (event) => event.key === 'Enter' && save());
-}
-
-async function deleteFileDialog(botId, filePath) {
-  const confirmed = await confirmAction({
-    title: 'Delete file',
-    message: `Delete <strong class="mono">${esc(filePath)}</strong>? This cannot be undone.`,
-    confirmText: 'Delete'
-  });
-  if (!confirmed) return;
-  try {
-    await api(`/api/bots/${botId}/files/delete`, { method: 'POST', body: { path: filePath } });
-    toast('Deleted', 'success');
-    loadFiles(botId, state.filePath);
-  } catch (err) {
-    if (!err.isAuth) toast(err.message, 'error');
-  }
-}
-
-async function extractDialog(botId, filePath) {
-  const confirmed = await confirmAction({
-    title: 'Extract archive',
-    message: `Extract <strong class="mono">${esc(filePath)}</strong> into <span class="mono">/${esc(dirname(filePath) || '')}</span>? Existing files may be overwritten.`,
-    confirmText: 'Extract',
-    danger: false
-  });
-  if (!confirmed) return;
-  try {
-    const result = await api(`/api/bots/${botId}/files/extract`, { method: 'POST', body: { path: filePath } });
-    toast(`Extracted ${result.files} entries`, 'success');
-    loadFiles(botId, dirname(filePath));
-  } catch (err) {
-    if (!err.isAuth) toast(err.message, 'error');
-  }
-}
-
-async function downloadFile(botId, filePath) {
-  try {
-    const response = await fetch(
-      `/api/bots/${botId}/files/download?path=${encodeURIComponent(filePath)}`,
-      { headers: state.token ? { Authorization: `Bearer ${state.token}` } : {} }
-    );
-    if (!response.ok) throw new Error(`Download failed (${response.status})`);
-    const blob = await response.blob();
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = basename(filePath);
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(link.href), 4000);
-  } catch (err) {
-    toast(err.message, 'error');
-  }
-}
-
-async function downloadLogs(botId, botName) {
-  try {
-    const response = await fetch(`/api/bots/${botId}/logs/download`, {
-      headers: state.token ? { Authorization: `Bearer ${state.token}` } : {}
-    });
-    if (!response.ok) throw new Error(response.status === 404 ? 'No logs yet' : `Download failed (${response.status})`);
-    const blob = await response.blob();
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `${String(botName || 'bot').replace(/[^A-Za-z0-9._-]+/g, '_')}.log`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(link.href), 4000);
-  } catch (err) {
-    toast(err.message, 'error');
-  }
-}
-
-/* --------------------------- bot settings --------------------------- */
-
-function initBotSettings(bot, host) {
-  const envRows = Object.entries(bot.env || {})
-    .map(
-      ([key, value]) => `
-      <div class="env-row" data-env-row>
-        <input class="input mono" data-env-key placeholder="KEY" value="${esc(key)}" spellcheck="false">
-        <input class="input mono env-value" data-env-val placeholder="value" value="${esc(value)}" spellcheck="false">
-        <button class="icon-btn danger" type="button" data-action="remove-env" title="Remove">${icon('x', 'sm')}</button>
-      </div>`
-    )
-    .join('');
-
-  host.innerHTML = `
-    <div class="stack">
-      <div class="card">
-        <div class="card-head"><h3>${icon('settings', 'sm')} Bot configuration</h3>
-          <div class="right">
-            <span class="chip hide-sm">id ${esc(bot.id)}</span>
-            <button class="btn xs ghost" data-action="clone-bot" data-bot="${bot.id}">${icon('copy', 'xs')} Clone</button>
-          </div>
-        </div>
-        <div class="card-body">
-          <div class="form-grid">
-            <div class="field">
-              <label>Bot name</label>
-              <input class="input" id="f-name" value="${esc(bot.name)}" maxlength="40">
-            </div>
-            <div class="field">
-              <label>Runtime</label>
-              <select class="select" id="f-runtime">
-                ${['node', 'python', 'bash', 'custom']
-                  .map((rt) => `<option value="${rt}" ${bot.runtime === rt ? 'selected' : ''}>${runtimeLabel(rt)}</option>`)
-                  .join('')}
-              </select>
-              <div class="hint">Node.js · Python · Bash · Custom shell command</div>
-            </div>
-            <div class="field">
-              <label>Entry file / command</label>
-              <input class="input mono" id="f-entry" value="${esc(bot.entry || '')}" spellcheck="false">
-              <div class="hint" id="f-entry-hint">${bot.runtime === 'custom' ? 'Runs through /bin/sh — e.g. <span class="mono">bash start.sh</span>' : 'Relative to the bot folder'}</div>
-            </div>
-            <div class="field">
-              <label>Arguments <span class="hint">optional</span></label>
-              <input class="input mono" id="f-args" value="${esc(bot.args || '')}" placeholder="--flag value" spellcheck="false">
-            </div>
-            <div class="field">
-              <label>Port <span class="hint">optional</span></label>
-              <input class="input mono" id="f-port" type="number" min="1" max="65535" value="${bot.port || ''}" placeholder="3001">
-              <div class="hint">Injected as <span class="mono">PORT</span> env variable</div>
-            </div>
-            <div class="field">
-              <label>Memory limit (MB)</label>
-              <input class="input mono" id="f-memlimit" type="number" min="0" max="65536" value="${bot.memoryLimitMB || 0}">
-              <div class="hint">0 = unlimited. Bot is stopped if it goes above this.</div>
-            </div>
-            <div class="field full">
-              <label>Description <span class="hint">optional</span></label>
-              <input class="input" id="f-description" value="${esc(bot.description || '')}" placeholder="What does this bot do?" maxlength="300">
-            </div>
-          </div>
-
-          <div class="divider"></div>
-
-          <div class="row" style="gap:26px;flex-wrap:wrap">
-            <label class="switch">
-              <input type="checkbox" id="f-autostart" ${bot.autostart ? 'checked' : ''}>
-              <span class="track"></span>
-              <span class="label">Start with panel</span>
+    const hashMem = (S.system && Math.floor(S.system.mem.total / 1048576)) || 2048;
+    const maxMem = Math.max(512, Math.min(16384, hashMem - 512));
+
+    modal({
+      title: 'Naya VPS banayein',
+      sub: 'Base image se turant ek naya virtual machine ban jayega (copy-on-write disk).',
+      wide: true,
+      body: `
+        <form id="create-form">
+          <div class="row">
+            <label class="field"><span class="lbl">Naam</span><input type="text" name="name" placeholder="jaise: bot-server-1" required /></label>
+            <label class="field"><span class="lbl">OS image</span>
+              <select name="imageId">${installed
+                .map((i) => `<option value="${esc(i.id)}">${esc(i.name)} — ${esc(i.sizeText)}</option>`)
+                .join('')}</select>
             </label>
-            <label class="switch">
-              <input type="checkbox" id="f-autorestart" ${bot.autoRestart ? 'checked' : ''}>
-              <span class="track"></span>
-              <span class="label">Auto-restart on crash</span>
+          </div>
+          <div class="row">
+            <label class="field"><span class="lbl">CPU (vCPU)</span><input type="number" name="cpu" value="2" min="1" max="8" /></label>
+            <label class="field"><span class="lbl">RAM (MB)</span><input type="number" name="memMB" value="1024" min="256" max="${maxMem}" step="256" /></label>
+            <label class="field"><span class="lbl">Disk (GB)</span><input type="number" name="diskGB" value="10" min="2" max="500" /></label>
+          </div>
+          <div class="row">
+            <label class="field"><span class="lbl">Linux user</span><input type="text" name="user" value="ubuntu" /></label>
+            <label class="field"><span class="lbl">Root/user password</span>
+              <div class="copy-row"><input type="text" name="password" value="${esc(randPw())}" /><button type="button" class="sm" id="gen-pw">↻</button></div>
             </label>
-            <div class="row" style="gap:8px">
-              <span class="muted small">Max restart attempts</span>
-              <input class="input mono" id="f-maxrestarts" type="number" min="0" max="1000" value="${bot.maxRestarts ?? 10}" style="width:84px;height:32px">
+          </div>
+          <label class="field"><span class="lbl">SSH public key (optional)</span>
+            <textarea name="sshKeys" placeholder="ssh-ed25519 AAAAC3Nza..."></textarea>
+            <span class="hint">Ek line me ek key. Password se bhi SSH login chalega.</span>
+          </label>
+          <div class="row" style="gap:18px">
+            <label class="check"><input type="checkbox" name="start" checked /> Bante hi start karein</label>
+            <label class="check"><input type="checkbox" name="autostart" /> Host reboot par khud start ho</label>
+          </div>
+          <div class="hint-box mt16">Disk copy-on-write hai — 10GB likhne par bhi shuru me sirf kuch MB jagah leta hai.</div>
+          <div class="modal-foot">
+            <button type="button" class="ghost" data-close>Cancel</button>
+            <button type="submit" class="primary">Create VPS</button>
+          </div>
+        </form>`,
+      after: (root) => {
+        const form = root.querySelector('#create-form');
+        const sel = form.querySelector('select[name=imageId]');
+        const updUser = () => {
+          const img = installed.find((i) => i.id === sel.value);
+          if (img && img.user) form.querySelector('input[name=user]').value = img.user;
+        };
+        sel.onchange = updUser;
+        updUser();
+        form.querySelector('#gen-pw').onclick = () => {
+          form.querySelector('input[name=password]').value = randPw();
+        };
+        form.onsubmit = async (e) => {
+          e.preventDefault();
+          const btn = form.querySelector('button[type=submit]');
+          btn.disabled = true;
+          const fd = new FormData(form);
+          const payload = {
+            name: fd.get('name'),
+            imageId: fd.get('imageId'),
+            cpu: Number(fd.get('cpu')),
+            memMB: Number(fd.get('memMB')),
+            diskGB: Number(fd.get('diskGB')),
+            user: fd.get('user'),
+            password: fd.get('password'),
+            sshKeys: String(fd.get('sshKeys') || '')
+              .split('\n')
+              .map((s) => s.trim())
+              .filter(Boolean),
+            start: fd.get('start') === 'on',
+            autostart: fd.get('autostart') === 'on'
+          };
+          try {
+            const d = await api('/api/vms', { method: 'POST', body: payload });
+            closeModal();
+            toast('VPS ban gaya', 'ok');
+            location.hash = `#/vm/${d.vm.id}`;
+          } catch (err) {
+            toast(err.message, 'err');
+            btn.disabled = false;
+          }
+        };
+      }
+    });
+  }
+
+  function randPw() {
+    const c = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let s = '';
+    for (let i = 0; i < 12; i++) s += c[Math.floor(Math.random() * c.length)];
+    return s;
+  }
+
+  // ---------------- VM detail ----------------
+  async function viewVm(id, { keepTerm = false } = {}) {
+    S.view = 'vm';
+    let vm;
+    try {
+      vm = (await api(`/api/vms/${id}`)).vm;
+    } catch (e) {
+      toast(e.message, 'err');
+      location.hash = '#/';
+      return;
+    }
+    S.vm = vm;
+    const running = vm.status && vm.status.running;
+
+    const body = `
+      <div class="page-head">
+        <div>
+          <h1 style="display:flex;align-items:center;gap:10px">${esc(vm.name)} ${badge(vm)}</h1>
+          <p>${esc(vm.imageName || vm.imageId)} · created ${new Date(vm.createdAt).toLocaleString()}</p>
+        </div>
+        <div class="spacer"></div>
+        <div class="vm-actions">
+          ${running ? '<button id="a-stop">Stop</button><button id="a-restart">Restart</button>' : '<button class="primary" id="a-start">Start</button>'}
+          <button class="ghost" id="a-clone">Clone</button>
+          <button class="ghost" id="a-reinstall">Reinstall</button>
+          <button class="ghost danger" id="a-delete">Delete</button>
+        </div>
+      </div>
+
+      <div class="grid" style="grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);align-items:start" id="vm-grid">
+        <div class="card">
+          <div class="term" id="term">
+            <div class="term-head"><span class="dots"><i></i><i></i><i></i></span> serial console — ${esc(vm.name)} <span class="right badge" id="term-state">${running ? 'connecting…' : 'VM band hai'}</span></div>
+            <div class="term-body" id="term-body" tabindex="0">${
+              running ? '' : '\n  VM band hai. Start karne par yahan boot log dikhega.\n'
+            }</div>
+            <div class="term-foot">
+              <span>Console par click karein, phir type karein</span>
+              <span class="right"><button class="sm ghost" id="term-clear">Clear</button></span>
             </div>
           </div>
+          ${
+            running
+              ? ''
+              : `<div class="hint-box mt16">Boot hone me 20-60 second lag sakte hain (TCG mode me zyada). Login prompt aane par hi SSH kaam karega.</div>`
+          }
+        </div>
 
-          <div class="divider"></div>
-
-          <div class="field">
-            <label>Environment variables</label>
-            <div class="stack" id="env-rows" style="gap:8px">
-              ${envRows || '<div class="env-empty" id="env-empty">No variables yet.</div>'}
-            </div>
-            <div style="margin-top:10px">
-              <button class="btn sm ghost" type="button" data-action="add-env">${icon('plus', 'sm')} Add variable</button>
+        <div class="grid" style="gap:14px">
+          <div class="card">
+            <h3 class="mt0" style="font-size:15px;margin-bottom:12px">Machine</h3>
+            <div class="kv">
+              <div class="item"><div class="k">vCPU</div><div class="v">${vm.cpu}</div></div>
+              <div class="item"><div class="k">RAM</div><div class="v">${vm.memMB} MB</div></div>
+              <div class="item"><div class="k">Disk</div><div class="v">${vm.diskGB} GB</div></div>
+              <div class="item"><div class="k">PID</div><div class="v">${vm.status.pid || '—'}</div></div>
             </div>
           </div>
+          <div class="card">
+            <h3 class="mt0" style="font-size:15px;margin-bottom:12px">Access</h3>
+            <div class="kv">
+              <div class="item"><div class="k">SSH</div><div class="v">${esc(vm.user)}@127.0.0.1:${vm.sshPort}</div></div>
+              <div class="item"><div class="k">Password</div><div class="v">${esc(vm.password || '—')}</div></div>
+            </div>
+            <div class="copy-row mt16">
+              <input type="text" readonly value="ssh -p ${vm.sshPort} ${esc(vm.user)}@127.0.0.1" id="ssh-cmd" />
+              <button class="sm" id="copy-ssh">Copy</button>
+            </div>
+            <div class="small mute mt16">Ye command VPS ke andar se chalti hai. Laptop se: pehle <span class="mono-code">ssh -L ${vm.sshPort}:127.0.0.1:${vm.sshPort} root@host</span></div>
+          </div>
+          <div class="card">
+            <h3 class="mt0" style="font-size:15px;margin-bottom:12px">Share (doston ke liye)</h3>
+            <div class="copy-row">
+              <input type="text" readonly value="${esc(location.origin + '/#/console/' + vm.shareToken)}" id="share-url" />
+              <button class="sm" id="copy-share">Copy</button>
+            </div>
+            <div class="small mute mt16">Is link se sirf console khulta hai (browser me). Panel ka control nahi milta.</div>
+          </div>
+        </div>
+      </div>
 
-          <div class="divider"></div>
+      <div class="card mt16">
+        <div class="page-head" style="margin-bottom:12px">
+          <div><h2 style="font-size:16px;margin:0">Settings</h2><p class="small">CPU/RAM badalne se pehle VM stop karein.</p></div>
+          <div class="spacer"></div>
+        </div>
+        <form id="vm-settings">
+          <div class="row">
+            <label class="field"><span class="lbl">Naam</span><input type="text" name="name" value="${esc(vm.name)}" /></label>
+            <label class="field"><span class="lbl">vCPU</span><input type="number" name="cpu" value="${vm.cpu}" min="1" max="8" /></label>
+            <label class="field"><span class="lbl">RAM (MB)</span><input type="number" name="memMB" value="${vm.memMB}" min="256" step="256" /></label>
+          </div>
+          <div class="row">
+            <label class="field"><span class="lbl">Naya password</span><input type="text" name="password" placeholder="khali chhodein to badlega nahi" /></label>
+            <label class="field"><span class="lbl">Disk resize (GB)</span>
+              <div class="copy-row"><input type="number" name="diskGB" value="${vm.diskGB}" min="${vm.diskGB}" /><button type="button" class="sm" id="btn-resize">Resize</button></div>
+              <span class="hint">Sirf badha sakte hain, VM band hona chahiye.</span>
+            </label>
+          </div>
+          <label class="field"><span class="lbl">Notes</span><textarea name="notes" placeholder="is VM ka kaam kya hai…">${esc(vm.notes || '')}</textarea></label>
+          <label class="check mb16"><input type="checkbox" name="autostart" ${vm.autostart ? 'checked' : ''} /> Host start hone par ye VM khud chalu ho</label>
+          <div class="row">
+            <button class="primary" type="submit">Save</button>
+            <button class="ghost" type="button" id="btn-snapshots">Snapshots</button>
+          </div>
+        </form>
+      </div>
+    `;
 
-          <div class="row-between" style="flex-wrap:wrap;gap:12px">
-            <div class="muted small">Last exit:
-              ${
-                bot.lastExit
-                  ? `<span class="mono">${esc(bot.lastExit.reason || 'exit ' + bot.lastExit.code)}</span> · ${new Date(bot.lastExit.at).toLocaleString()}`
-                  : 'never'
+    shell('vms', body);
+
+    // actions
+    const q = (sel) => document.querySelector(sel);
+    if (q('#a-start')) q('#a-start').onclick = async () => {
+      try {
+        toast('Start ho raha hai…', 'ok');
+        await api(`/api/vms/${id}/start`, { method: 'POST' });
+        await viewVm(id);
+      } catch (e) {
+        toast(e.message, 'err');
+      }
+    };
+    if (q('#a-stop'))
+      q('#a-stop').onclick = async () => {
+        try {
+          await api(`/api/vms/${id}/stop`, { method: 'POST' });
+          toast('VM band ho gaya', 'ok');
+          await viewVm(id);
+        } catch (e) {
+          toast(e.message, 'err');
+        }
+      };
+    if (q('#a-restart'))
+      q('#a-restart').onclick = async () => {
+        try {
+          toast('Restart ho raha hai…', 'ok');
+          await api(`/api/vms/${id}/restart`, { method: 'POST' });
+          await viewVm(id);
+        } catch (e) {
+          toast(e.message, 'err');
+        }
+      };
+    q('#a-delete').onclick = () => confirmDelete(id);
+    q('#a-reinstall').onclick = async () => {
+      const ok = await confirmDialog({
+        title: 'Reinstall karein?',
+        sub: 'Disk naye siro se ban jayega — VM ka saara data delete hoga. Password/keys dobara apply honge.',
+        okText: 'Reinstall',
+        danger: true
+      });
+      if (!ok) return;
+      try {
+        await api(`/api/vms/${id}/reinstall`, { method: 'POST' });
+        toast('Disk naya ban gaya', 'ok');
+        await viewVm(id);
+      } catch (e) {
+        toast(e.message, 'err');
+      }
+    };
+    q('#a-clone').onclick = async () => {
+      const name = await promptDialog({ title: 'Clone', label: 'Naye VM ka naam', value: `${vm.name}-copy` });
+      if (!name) return;
+      try {
+        const d = await api(`/api/vms/${id}/clone`, { method: 'POST', body: { name } });
+        toast('Clone ban gaya', 'ok');
+        location.hash = `#/vm/${d.vm.id}`;
+      } catch (e) {
+        toast(e.message, 'err');
+      }
+    };
+    q('#copy-ssh').onclick = () => copy(q('#ssh-cmd').value, 'SSH command copy ho gaya');
+    q('#copy-share').onclick = () => copy($('#share-url').value, 'Share link copy ho gaya');
+
+    const form = q('#vm-settings');
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const patch = {
+        name: fd.get('name'),
+        cpu: Number(fd.get('cpu')),
+        memMB: Number(fd.get('memMB')),
+        notes: fd.get('notes'),
+        autostart: fd.get('autostart') === 'on'
+      };
+      const pw = String(fd.get('password') || '').trim();
+      if (pw) patch.password = pw;
+      try {
+        await api(`/api/vms/${id}`, { method: 'PATCH', body: patch });
+        toast('Save ho gaya', 'ok');
+        await viewVm(id);
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    };
+    q('#btn-resize').onclick = async () => {
+      const gb = Number(form.querySelector('input[name=diskGB]').value);
+      try {
+        await api(`/api/vms/${id}/resize`, { method: 'POST', body: { diskGB: gb } });
+        toast('Disk badh gaya', 'ok');
+        await viewVm(id);
+      } catch (e) {
+        toast(e.message, 'err');
+      }
+    };
+    q('#btn-snapshots').onclick = () => openSnapshots(id);
+
+    // terminal
+    if (running) {
+      S.term = new Term(document.getElementById('term-body'), id, { shareToken: null, stateEl: document.getElementById('term-state') });
+      S.term.open();
+      q('#term-clear').onclick = () => {
+        document.getElementById('term-body').textContent = '';
+      };
+    } else if (S.term) {
+      S.term.close();
+      S.term = null;
+    }
+
+    // status refresh (console ko chhed ke nahi)
+    startPolling(async () => {
+      try {
+        const d = await api(`/api/vms/${id}`);
+        const wasRunning = vm.status.running;
+        vm = d.vm;
+        const head = document.querySelector('.page-head h1');
+        const runningNow = vm.status.running;
+        if (head) head.innerHTML = `${esc(vm.name)} ${badge(vm)}`;
+        if (wasRunning !== runningNow) {
+          await viewVm(id);
+        }
+      } catch {}
+    }, 5000);
+  }
+
+  function copy(text, msg) {
+    navigator.clipboard
+      .writeText(text)
+      .then(() => toast(msg || 'Copy ho gaya', 'ok'))
+      .catch(() => toast('Copy nahi hua — manually select karein', 'err'));
+  }
+
+  // ---------------- snapshots ----------------
+  async function openSnapshots(id) {
+    const load = async () => {
+      const d = await api(`/api/vms/${id}/snapshots`);
+      return d.snapshots || [];
+    };
+    let snaps = await load().catch(() => []);
+    const render = () => `
+      <div class="copy-row mb16">
+        <input type="text" id="snap-tag" placeholder="snapshot name (jaise: clean-install)" />
+        <button class="primary sm" id="snap-add">Create</button>
+      </div>
+      ${
+        snaps.length
+          ? `<div class="grid" style="gap:8px">${snaps
+              .map(
+                (s) => `<div class="stat" style="display:flex;align-items:center;gap:10px">
+                  <div style="flex:1"><div class="v" style="font-size:14px">${esc(s.tag)}</div><div class="s">${esc(s.date || '')} ${esc(s.size || '')}</div></div>
+                  <button class="sm" data-restore="${esc(s.tag)}">Restore</button>
+                  <button class="sm danger" data-del="${esc(s.tag)}">Delete</button>
+                </div>`
+              )
+              .join('')}</div>`
+          : '<div class="empty" style="padding:26px">Abhi koi snapshot nahi. Snapshot VM ki current state save karta hai.</div>'
+      }`;
+    const m = modal({
+      title: 'Snapshots',
+      sub: 'Snapshot se VM usi state me wapas aa sakta hai.',
+      body: render(),
+      okText: 'Band karein',
+      after: async (root) => {
+        const bind = () => {
+          root.querySelector('#snap-add').onclick = async () => {
+            const tag = root.querySelector('#snap-tag').value;
+            try {
+              const d = await api(`/api/vms/${id}/snapshots`, { method: 'POST', body: { tag } });
+              snaps = d.snapshots || [];
+              root.querySelector('.modal-body, .modal').innerHTML = render();
+              bind();
+              toast('Snapshot ban gaya', 'ok');
+            } catch (e) {
+              toast(e.message, 'err');
+            }
+          };
+          root.querySelectorAll('[data-restore]').forEach((b) => {
+            b.onclick = async () => {
+              try {
+                await api(`/api/vms/${id}/snapshots/${encodeURIComponent(b.dataset.restore)}/restore`, { method: 'POST' });
+                toast('Restore ho gaya', 'ok');
+              } catch (e) {
+                toast(e.message, 'err');
               }
-            </div>
-            <button class="btn primary" data-action="save-bot" data-bot="${bot.id}">${icon('save', 'sm')} Save changes</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="card danger-zone">
-        <div class="card-head"><h3>${icon('alert', 'sm')} Danger zone</h3></div>
-        <div class="card-body">
-          <div class="row-between" style="flex-wrap:wrap;gap:14px">
-            <div>
-              <div style="font-weight:600;font-size:13px">Delete this bot</div>
-              <div class="muted small" style="margin-top:2px">Stops the process and removes it from the panel.</div>
-            </div>
-            <div class="row" style="gap:8px">
-              <button class="btn sm ghost" data-action="bot-op" data-bot="${bot.id}" data-op="kill">${icon('power', 'sm')} Force kill</button>
-              <button class="btn sm danger" data-action="delete-bot" data-bot="${bot.id}">${icon('trash', 'sm')} Delete bot</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>`;
-
-  bindRuntimeDefaults();
-}
-
-/** When the runtime changes, swap a default-looking entry file automatically. */
-function bindRuntimeDefaults() {
-  const select = $('#f-runtime');
-  const entry = $('#f-entry');
-  const hint = $('#f-entry-hint');
-  if (!select || !entry) return;
-
-  const defaults = { node: 'index.js', python: 'main.py', bash: 'start.sh', custom: 'bash start.sh' };
-  const hints = {
-    node: 'Relative to the bot folder',
-    python: 'Relative to the bot folder',
-    bash: 'Relative to the bot folder',
-    custom: 'Runs through /bin/sh — e.g. <span class="mono">bash start.sh</span>'
-  };
-  let previous = select.value;
-
-  select.addEventListener('change', () => {
-    const next = select.value;
-    const current = entry.value.trim();
-    if (!current || current === defaults[previous]) entry.value = defaults[next];
-    if (hint) hint.innerHTML = hints[next] || '';
-    previous = next;
-  });
-}
-
-function runtimeLabel(runtime) {
-  return runtime === 'node' ? 'Node.js' : runtime === 'python' ? 'Python' : runtime === 'bash' ? 'Bash script' : 'Custom command';
-}
-
-function addEnvRow() {
-  const container = $('#env-rows');
-  if (!container) return;
-  const empty = $('#env-empty');
-  if (empty) empty.remove();
-  const row = document.createElement('div');
-  row.className = 'env-row';
-  row.setAttribute('data-env-row', '');
-  row.innerHTML = `
-    <input class="input mono" data-env-key placeholder="KEY" spellcheck="false">
-    <input class="input mono env-value" data-env-val placeholder="value" spellcheck="false">
-    <button class="icon-btn danger" type="button" data-action="remove-env" title="Remove">${icon('x', 'sm')}</button>`;
-  container.appendChild(row);
-  row.querySelector('[data-env-key]').focus();
-}
-
-async function saveBotSettings(botId) {
-  const env = {};
-  $$('#env-rows [data-env-row]').forEach((row) => {
-    const key = row.querySelector('[data-env-key]').value.trim();
-    const value = row.querySelector('[data-env-val]').value;
-    if (key) env[key] = value;
-  });
-
-  const payload = {
-    name: $('#f-name').value.trim(),
-    runtime: $('#f-runtime').value,
-    entry: $('#f-entry').value.trim(),
-    args: $('#f-args').value,
-    description: $('#f-description').value,
-    port: $('#f-port').value ? Number($('#f-port').value) : null,
-    memoryLimitMB: Number($('#f-memlimit').value) || 0,
-    maxRestarts: Number($('#f-maxrestarts').value) || 0,
-    autoRestart: $('#f-autorestart').checked,
-    autostart: $('#f-autostart').checked,
-    env
-  };
-
-  const button = $('[data-action="save-bot"]');
-  if (button) button.disabled = true;
-  try {
-    await api(`/api/bots/${botId}`, { method: 'PATCH', body: payload });
-    toast('Bot settings saved', 'success');
-    await loadOverview();
-    const bot = botById(botId);
-    if (bot) {
-      renderTopbar({
-        title: bot.name,
-        subtitle: `${esc(bot.runtime)} · ${esc(bot.entry || '—')}`,
-        back: true,
-        actions: `<button class="btn sm ghost" data-action="new-bot">${icon('plus', 'sm')} <span class="hide-sm">New bot</span></button>`
-      });
-      syncBotLive();
-    }
-  } catch (err) {
-    if (!err.isAuth) toast(err.message, 'error');
-  } finally {
-    if (button) button.disabled = false;
-  }
-}
-
-async function deleteBotDialog(botId) {
-  const bot = botById(botId);
-  if (!bot) return;
-  const confirmed = await confirmAction({
-    title: 'Delete bot',
-    message: `Permanently delete <strong>${esc(bot.name)}</strong>? The bot will be stopped and removed from the panel.`,
-    confirmText: 'Delete bot',
-    collect: () => Boolean($('#delete-files') && $('#delete-files').checked),
-    extra: `<label class="switch" style="margin-top:16px">
-        <input type="checkbox" id="delete-files">
-        <span class="track"></span>
-        <span class="label">Also delete all files in the bot folder</span>
-      </label>`
-  });
-  if (!confirmed) return;
-  const deleteFiles = Boolean(confirmed.extra);
-  try {
-    await api(`/api/bots/${botId}?files=${deleteFiles ? '1' : '0'}`, { method: 'DELETE' });
-    toast('Bot deleted', 'success');
-    if (state.route.name === 'bot' && state.route.id === botId) navigate('/bots');
-    await loadOverview();
-  } catch (err) {
-    if (!err.isAuth) toast(err.message, 'error');
-  }
-}
-
-/* --------------------------- clone bot ------------------------------ */
-
-function cloneBotDialog(botId) {
-  const bot = botById(botId);
-  if (!bot) return;
-  const modal = openModal({
-    title: 'Clone bot',
-    subtitle: 'Copies the whole bot folder and its settings',
-    body: `<div class="field">
-        <label>Name for the copy</label>
-        <input class="input" id="clone-name" value="${esc(bot.name + ' copy')}" maxlength="40">
-        <div class="hint">Files, environment variables and runtime settings are copied. The clone starts stopped.</div>
-      </div>`,
-    footer: `<button class="btn ghost" data-action="close-modal">Cancel</button>
-      <div class="right"><button class="btn primary" id="clone-create">${icon('copy', 'sm')} Clone bot</button></div>`
-  });
-
-  const input = $('#clone-name', modal);
-  input.select();
-
-  const create = async () => {
-    const name = input.value.trim();
-    if (!name) return toast('Enter a name', 'error');
-    const button = $('#clone-create', modal);
-    button.disabled = true;
-    button.innerHTML = 'Cloning…';
-    try {
-      const data = await api(`/api/bots/${botId}/clone`, { method: 'POST', body: { name } });
-      closeModal();
-      toast(`Cloned to "${name}"`, 'success');
-      await loadOverview();
-      navigate(`/bot/${data.bot.id}/settings`);
-    } catch (err) {
-      if (!err.isAuth) toast(err.message, 'error');
-      button.disabled = false;
-      button.innerHTML = `${icon('copy', 'sm')} Clone bot`;
-    }
-  };
-
-  $('#clone-create', modal).addEventListener('click', create);
-  input.addEventListener('keydown', (event) => event.key === 'Enter' && create());
-}
-
-/* --------------------------- new bot modal -------------------------- */
-
-function newBotDialog() {
-  const modal = openModal({
-    title: 'Create a bot',
-    subtitle: 'Runs as a normal process on this VPS — no Docker needed',
-    body: `
-      <div class="stack" style="gap:16px">
-        <div class="field">
-          <label>Bot name</label>
-          <input class="input" id="nb-name" placeholder="Minecraft bot" maxlength="40" autocomplete="off">
-        </div>
-        <div class="field">
-          <label>Runtime</label>
-          <select class="select" id="nb-runtime">
-            <option value="node">Node.js</option>
-            <option value="python">Python 3</option>
-            <option value="bash">Bash script</option>
-            <option value="custom">Custom command</option>
-          </select>
-          <div class="hint" id="nb-runtime-hint">Runs <span class="mono">node index.js</span> inside the bot folder.</div>
-        </div>
-        <div class="row" style="gap:24px;flex-wrap:wrap">
-          <label class="switch">
-            <input type="checkbox" id="nb-start" checked>
-            <span class="track"></span><span class="label">Start immediately</span>
-          </label>
-          <label class="switch">
-            <input type="checkbox" id="nb-autostart">
-            <span class="track"></span><span class="label">Start with panel</span>
-          </label>
-        </div>
-      </div>`,
-    footer: `<button class="btn ghost" data-action="close-modal">Cancel</button>
-      <div class="right"><button class="btn primary" id="nb-create">${icon('plus', 'sm')} Create bot</button></div>`
-  });
-
-  const hints = {
-    node: 'Runs <span class="mono">node index.js</span> inside the bot folder.',
-    python: 'Runs <span class="mono">python3 -u main.py</span> inside the bot folder.',
-    bash: 'Runs <span class="mono">bash start.sh</span> inside the bot folder.',
-    custom: 'Your command runs through <span class="mono">/bin/sh</span>.'
-  };
-
-  const runtime = $('#nb-runtime', modal);
-  runtime.addEventListener('change', () => {
-    $('#nb-runtime-hint', modal).innerHTML = hints[runtime.value];
-  });
-  runtime.dispatchEvent(new Event('change'));
-
-  const create = async () => {
-    const name = $('#nb-name', modal).value.trim();
-    if (!name) {
-      toast('Enter a bot name', 'error');
-      $('#nb-name', modal).focus();
-      return;
-    }
-    const button = $('#nb-create', modal);
-    button.disabled = true;
-    button.innerHTML = 'Creating…';
-    try {
-      const data = await api('/api/bots', {
-        method: 'POST',
-        body: {
-          name,
-          runtime: runtime.value,
-          start: $('#nb-start', modal).checked,
-          autostart: $('#nb-autostart', modal).checked
-        }
-      });
-      closeModal();
-      toast(`Bot "${name}" created`, 'success');
-      await loadOverview();
-      navigate(`/bot/${data.bot.id}/console`);
-    } catch (err) {
-      if (!err.isAuth) toast(err.message, 'error');
-      button.disabled = false;
-      button.innerHTML = `${icon('plus', 'sm')} Create bot`;
-    }
-  };
-
-  $('#nb-create', modal).addEventListener('click', create);
-  $('#nb-name', modal).addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') create();
-  });
-}
-
-/* -------------------------- panel settings -------------------------- */
-
-function renderSettingsView() {
-  renderTopbar({
-    title: 'Panel settings',
-    subtitle: 'Appearance, security and storage',
-    actions: ''
-  });
-
-  const system = state.overview && state.overview.system;
-  const dirs = state.overview && state.overview.dirs;
-
-  $('#content').innerHTML = `
-    <div class="content-inner view-enter" style="max-width:900px">
-      <div class="stack">
-        <div class="card">
-          <div class="card-head"><h3>${icon('settings', 'sm')} Panel</h3></div>
-          <div class="card-body">
-            <div class="form-grid">
-              <div class="field">
-                <label>Panel name</label>
-                <input class="input" id="panel-name-input" value="${esc(state.me ? state.me.panelName : 'BotDeck')}" maxlength="40">
-                <div class="hint">Shown in the sidebar and browser tab.</div>
-              </div>
-              <div class="field">
-                <label>Version</label>
-                <input class="input mono" value="BotDeck ${esc((state.status && state.status.version) || '1.0.0')}" disabled>
-                <div class="hint">Docker-free process manager</div>
-              </div>
-            </div>
-            <div style="margin-top:16px">
-              <button class="btn primary" data-action="save-panel-name">${icon('save', 'sm')} Save</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><h3>${icon('lock', 'sm')} Admin password</h3></div>
-          <div class="card-body">
-            <div class="form-grid">
-              <div class="field">
-                <label>Current password</label>
-                <input class="input" type="password" id="pw-current" autocomplete="current-password">
-              </div>
-              <div class="field">
-                <label>New password</label>
-                <input class="input" type="password" id="pw-next" autocomplete="new-password" placeholder="At least 8 characters">
-              </div>
-            </div>
-            <div style="margin-top:16px">
-              <button class="btn primary" data-action="change-password">${icon('lock', 'sm')} Update password</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><h3>${icon('server', 'sm')} Server & storage</h3></div>
-          <div class="info-list" id="settings-stats">
-            ${settingsStatsHtml(system, dirs)}
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><h3>${icon('zap', 'sm')} How BotDeck runs bots</h3></div>
-          <div class="card-body">
-            <div class="hint-box">
-              ${icon('zap', 'sm')}
-              <div>Every bot is a plain OS process launched from its own folder — no Docker, no containers, no extra daemons.
-              The panel supervises restarts, captures logs and manages files.</div>
-            </div>
-            <div class="stack" style="gap:10px;margin-top:16px;font-size:12.5px;color:var(--muted)">
-              <div class="row">${icon('folder', 'sm')} Bot files: <span class="mono">${esc(dirs ? dirs.bots : '')}</span></div>
-              <div class="row">${icon('file', 'sm')} Logs: <span class="mono">${esc(dirs ? dirs.data + '/logs' : '')}</span></div>
-              <div class="row">${icon('terminal', 'sm')} Keep the panel alive with systemd: <span class="mono">systemctl restart botdeck</span></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><h3>${icon('logout', 'sm')} Session</h3></div>
-          <div class="card-body row-between" style="flex-wrap:wrap;gap:12px">
-            <div class="muted small">Bots keep running on the server even when you sign out.</div>
-            <button class="btn ghost" data-action="logout">${icon('logout', 'sm')} Sign out</button>
-          </div>
-        </div>
-      </div>
-    </div>`;
-}
-
-function settingsStatsHtml(system, dirs) {
-  if (!system) return `<div class="info-row"><span class="k">Loading…</span></div>`;
-  const rows = [
-    ['server', 'Hostname', system.hostname],
-    ['cpu', 'CPU', `${system.cpuModel} (${system.cores} cores)`],
-    ['mem', 'Memory', `${fmtBytes(system.memory.total - system.memory.free)} / ${fmtBytes(system.memory.total)}`],
-    ['disk', 'Disk', system.disk ? `${fmtBytes(system.disk.used)} / ${fmtBytes(system.disk.total)}` : 'not available'],
-    ['clock', 'Server uptime', fmtDuration(system.uptime * 1000)],
-    ['code', 'Node.js', system.nodeVersion],
-    ['folder', 'Bots folder', dirs ? dirs.bots : '—'],
-    ['file', 'Data folder', dirs ? dirs.data : '—']
-  ];
-  return rows
-    .map(
-      ([ic, key, value]) => `<div class="info-row">
-        <span class="k">${icon(ic, 'xs')} ${esc(key)}</span>
-        <span class="v mono" title="${esc(value)}">${esc(value)}</span>
-      </div>`
-    )
-    .join('');
-}
-
-function syncSettingsStats() {
-  const container = $('#settings-stats');
-  if (!container || !state.overview) return;
-  container.innerHTML = settingsStatsHtml(state.overview.system, state.overview.dirs);
-}
-
-async function savePanelName() {
-  const input = $('#panel-name-input');
-  if (!input) return;
-  try {
-    const data = await api('/api/settings', { method: 'PATCH', body: { panelName: input.value.trim() } });
-    if (state.me) state.me.panelName = data.panelName;
-    if (state.overview) state.overview.panelName = data.panelName;
-    updatePanelName();
-    toast('Panel name saved', 'success');
-  } catch (err) {
-    if (!err.isAuth) toast(err.message, 'error');
-  }
-}
-
-async function changePassword() {
-  const current = $('#pw-current').value;
-  const next = $('#pw-next').value;
-  if (!current || !next) return toast('Fill both password fields', 'error');
-  if (next.length < 8) return toast('New password must be at least 8 characters', 'error');
-  try {
-    const data = await api('/api/auth/password', { method: 'POST', body: { current, next } });
-    state.token = data.token;
-    localStorage.setItem('bd_token', data.token);
-    $('#pw-current').value = '';
-    $('#pw-next').value = '';
-    toast('Password updated', 'success');
-  } catch (err) {
-    if (!err.isAuth) toast(err.message, 'error');
-  }
-}
-
-/* ------------------------------ events ------------------------------ */
-
-const OP_LABELS = { start: 'Starting', stop: 'Stopping', restart: 'Restarting', kill: 'Killing' };
-
-async function runBotOp(botId, op) {
-  const bot = botById(botId);
-  const name = bot ? bot.name : 'bot';
-
-  if (op === 'kill') {
-    const confirmed = await confirmAction({
-      title: 'Force kill bot',
-      message: `Immediately SIGKILL <strong>${esc(name)}</strong>? Unsaved progress inside the bot may be lost.`,
-      confirmText: 'Force kill'
+            };
+          });
+          root.querySelectorAll('[data-del]').forEach((b) => {
+            b.onclick = async () => {
+              try {
+                await api(`/api/vms/${id}/snapshots/${encodeURIComponent(b.dataset.del)}`, { method: 'DELETE' });
+                snaps = snaps.filter((s) => s.tag !== b.dataset.del);
+                root.querySelector('.modal').innerHTML = render();
+                bind();
+              } catch (e) {
+                toast(e.message, 'err');
+              }
+            };
+          });
+        };
+        bind();
+      }
     });
-    if (!confirmed) return;
-    try {
-      await api(`/api/bots/${botId}/kill`, { method: 'POST' });
-      toast(`Force killed ${name}`, 'success');
-      await loadOverview();
-    } catch (err) {
-      if (!err.isAuth) toast(err.message, 'error');
-    }
-    return;
+    return m;
   }
 
-  toast(`${OP_LABELS[op] || 'Working on'} ${name}…`, 'info', 2200);
-  const buttons = $$(`[data-action="bot-op"][data-bot="${botId}"]`);
-  buttons.forEach((button) => { button.disabled = true; });
-  try {
-    await api(`/api/bots/${botId}/${op}`, { method: 'POST' });
-    await loadOverview();
-    toast(`${name} ${op === 'start' ? 'started' : op === 'stop' ? 'stopped' : 'restarted'}`, 'success');
-  } catch (err) {
-    if (!err.isAuth) toast(err.message, 'error');
-    await loadOverview();
-  } finally {
-    buttons.forEach((button) => { button.disabled = false; });
-  }
-}
+  // ---------------- images ----------------
+  async function viewImages() {
+    S.view = 'images';
+    S.images = await api('/api/images');
+    const installed = S.images.images || [];
+    const cat = S.images.catalog || [];
+    const hasDownload = cat.some((c) => c.download && !c.download.done && !c.download.error);
 
-document.addEventListener('click', async (event) => {
-  const trigger = event.target.closest('[data-action]');
-  if (!trigger) return;
-  const action = trigger.dataset.action;
-  const botId = trigger.dataset.bot;
-  const path = trigger.dataset.path || '';
+    const catCards = cat
+      .map((c) => {
+        const dl = c.download;
+        const pct = dl && dl.total ? Math.min(100, Math.round((dl.received / dl.total) * 100)) : 0;
+        const item = installed.find((i) => i.id === c.id);
+        let action;
+        if (item && item.exists) action = `<span class="badge green"><i class="dot"></i>ready</span>`;
+        else if (dl && !dl.done && !dl.error)
+          action = `<div style="min-width:150px"><div class="bar"><i style="width:${pct}%"></i></div><div class="small mute">${fmtBytes(dl.received)}${dl.total ? ' / ' + fmtBytes(dl.total) : ''}</div></div>`;
+        else if (dl && dl.error) action = `<button class="sm" data-dl="${esc(c.id)}">Retry</button>`;
+        else action = `<button class="primary sm" data-dl="${esc(c.id)}">Download</button>`;
+        return `
+          <div class="card vm-card">
+            <div class="vm-top">
+              <div class="vm-icon">${esc(c.name.slice(0, 2))}</div>
+              <div style="flex:1"><div class="vm-title">${esc(c.name)}</div><div class="vm-sub">${esc(c.note || '')}</div></div>
+            </div>
+            <div class="vm-meta"><span class="badge">${esc(c.sizeText)}</span><span class="badge">user: ${esc(c.user)}</span></div>
+            <div class="vm-actions">${action}<button class="sm ghost danger" data-del-img="${esc(c.id)}" ${item ? '' : 'disabled'}>Delete</button></div>
+          </div>`;
+      })
+      .join('');
 
-  switch (action) {
-    case 'close-modal':
-      closeModal();
-      break;
+    const custom = installed.filter((i) => !cat.find((c) => c.id === i.id));
+    const customHtml = custom.length
+      ? `<div class="grid vms mt16">${custom
+          .map(
+            (i) => `<div class="card vm-card">
+              <div class="vm-top"><div class="vm-icon">${esc(i.name.slice(0, 2).toUpperCase())}</div>
+                <div style="flex:1"><div class="vm-title">${esc(i.name)}</div><div class="vm-sub">${esc(i.kind)} · ${esc(i.sizeText)}</div></div></div>
+              <div class="vm-actions"><button class="sm ghost danger" data-del-img="${esc(i.id)}">Delete</button></div>
+            </div>`
+          )
+          .join('')}</div>`
+      : '';
 
-    case 'open-sidebar':
-      $('#app').classList.add('sidebar-open');
-      break;
+    shell(
+      'images',
+      `
+      <div class="page-head">
+        <div><h1>OS Images</h1><p>VM banane ke liye base image chahiye. Cloud images me cloud-init hota hai — user/password khud set ho jate hain.</p></div>
+        <div class="spacer"></div>
+        <label class="btn primary" style="cursor:pointer">Upload ISO/IMG<input type="file" id="iso-file" accept=".iso,.img,.qcow2,.raw" style="display:none" /></label>
+      </div>
+      <div class="hint-box">Apna ISO (Windows/other Linux) upload karke bhi VM bana sakte hain, par usme OS install manually karna hoga (console se). Cloud images automatic hain.</div>
+      <div class="grid vms">${catCards}</div>
+      ${customHtml}
+      <div class="card mt16" id="upload-card" style="display:none">
+        <div class="page-head" style="margin:0 0 8px"><div><b id="up-name">Upload</b></div></div>
+        <div class="bar"><i id="up-bar" style="width:0%"></i></div>
+        <div class="small mute mt16" id="up-info"></div>
+      </div>
+    `
+    );
 
-    case 'close-sidebar':
-      closeSidebar();
-      break;
-
-    case 'new-bot':
-      newBotDialog();
-      break;
-
-    case 'logout':
-      try {
-        await api('/api/auth/logout', { method: 'POST' });
-      } catch (_) { /* ignore */ }
-      state.token = '';
-      localStorage.removeItem('bd_token');
-      state.me = null;
-      showAuth(state.status || { setup: false, panelName: 'BotDeck' });
-      break;
-
-    case 'goto-bot':
-      event.preventDefault();
-      navigate(`/bot/${botId}/console`);
-      break;
-
-    case 'bot-op':
-      event.preventDefault();
-      event.stopPropagation();
-      runBotOp(botId, trigger.dataset.op);
-      break;
-
-    case 'bulk': {
-      const op = trigger.dataset.op;
-      const confirmed = await confirmAction({
-        title: op === 'start-all' ? 'Start all bots' : 'Stop all bots',
-        message:
-          op === 'start-all'
-            ? 'Start every bot in the panel?'
-            : 'Stop every running bot? They will stay stopped until started again.',
-        confirmText: op === 'start-all' ? 'Start all' : 'Stop all',
-        danger: op === 'stop-all'
-      });
-      if (!confirmed) break;
-      try {
-        const result = await api('/api/bots/actions', { method: 'POST', body: { action: op } });
-        toast(`${result.ok} bot(s) updated${result.failed ? `, ${result.failed} failed` : ''}`, 'success');
-        await loadOverview();
-      } catch (err) {
-        if (!err.isAuth) toast(err.message, 'error');
-      }
-      break;
-    }
-
-    case 'clear-logs':
-      try {
-        await api(`/api/bots/${botId}/logs`, { method: 'DELETE' });
-        const term = $('#terminal');
-        if (term) {
-          term.innerHTML = '';
-          showConsoleEmpty();
+    app.querySelectorAll('[data-dl]').forEach((b) => {
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          await api('/api/images/download', { method: 'POST', body: { id: b.dataset.dl } });
+          toast('Download shuru — progress yahan dikhega', 'ok');
+          viewImages();
+        } catch (e) {
+          toast(e.message, 'err');
+          b.disabled = false;
         }
-        toast('Console cleared', 'success');
+      };
+    });
+    app.querySelectorAll('[data-del-img]').forEach((b) => {
+      b.onclick = async () => {
+        const ok = await confirmDialog({ title: 'Image delete?', sub: 'Jin VMs me ye image use ho rahi hai unhe pehle delete karna hoga.', okText: 'Delete', danger: true });
+        if (!ok) return;
+        try {
+          await api(`/api/images/${encodeURIComponent(b.dataset.delImg)}`, { method: 'DELETE' });
+          toast('Image delete ho gayi', 'ok');
+          viewImages();
+        } catch (e) {
+          toast(e.message, 'err');
+        }
+      };
+    });
+
+    const fileInput = app.querySelector('#iso-file');
+    fileInput.onchange = () => {
+      const f = fileInput.files && fileInput.files[0];
+      if (!f) return;
+      uploadFile(f);
+    };
+
+    if (hasDownload) S.imgTimer = setInterval(() => {
+      if (!document.hidden) viewImages().catch(() => {});
+    }, 2000);
+  }
+
+  function uploadFile(file) {
+    const card = document.getElementById('upload-card');
+    const bar = document.getElementById('up-bar');
+    const name = document.getElementById('up-name');
+    const info = document.getElementById('up-info');
+    card.style.display = 'block';
+    name.textContent = file.name;
+    info.textContent = `0 / ${fmtBytes(file.size)}`;
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/images/upload?name=${encodeURIComponent(file.name)}`);
+    xhr.upload.onprogress = (e) => {
+      const pct = e.lengthComputable ? Math.round((e.loaded / e.total) * 100) : 0;
+      bar.style.width = `${pct}%`;
+      info.textContent = `${fmtBytes(e.loaded)} / ${fmtBytes(e.total)} (${pct}%)`;
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        toast('Upload ho gaya', 'ok');
+        viewImages();
+      } else {
+        let msg = 'Upload fail';
+        try {
+          msg = JSON.parse(xhr.responseText).error || msg;
+        } catch {}
+        toast(msg, 'err');
+        info.textContent = msg;
+      }
+    };
+    xhr.onerror = () => toast('Upload fail (network)', 'err');
+    xhr.send(file);
+  }
+
+  // ---------------- settings ----------------
+  async function viewSettings() {
+    S.view = 'settings';
+    await loadSystem().catch(() => {});
+    const sys = S.system || {};
+    const s = sys.settings || {};
+    shell(
+      'settings',
+      `
+      <div class="page-head"><div><h1>Settings</h1><p>Panel aur host ki jaankari.</p></div></div>
+      <div class="grid" style="grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start">
+        <div class="card">
+          <h3 class="mt0" style="font-size:15px">Panel</h3>
+          <form id="set-form">
+            <label class="field"><span class="lbl">SSH host (display ke liye)</span>
+              <input type="text" name="sshHost" value="${esc(s.sshHost || '')}" placeholder="jaise: 203.0.113.10 ya myvps.com" />
+              <span class="hint">SSH command me ye host dikhega. VPS ka public IP/domain daalein.</span>
+            </label>
+            <label class="field"><span class="lbl">Panel ka naam</span><input type="text" name="panelName" value="${esc(s.panelName || 'VPSDeck')}" /></label>
+            <button class="primary" type="submit">Save</button>
+          </form>
+          <hr style="border:none;border-top:1px solid var(--line-soft);margin:20px 0" />
+          <h3 style="font-size:15px">Password badlein</h3>
+          <form id="pw-form">
+            <label class="field"><span class="lbl">Purana password</span><input type="password" name="current" autocomplete="current-password" /></label>
+            <label class="field"><span class="lbl">Naya password</span><input type="password" name="next" autocomplete="new-password" /></label>
+            <button class="primary" type="submit">Password badlein</button>
+          </form>
+        </div>
+        <div class="card">
+          <h3 class="mt0" style="font-size:15px">Host</h3>
+          <div class="kv">
+            <div class="item"><div class="k">Hostname</div><div class="v">${esc(sys.host || '-')}</div></div>
+            <div class="item"><div class="k">Node</div><div class="v">${esc(sys.node || '-')}</div></div>
+            <div class="item"><div class="k">QEMU</div><div class="v">${esc(sys.qemu && sys.qemu.version ? sys.qemu.version : 'missing')}</div></div>
+            <div class="item"><div class="k">Acceleration</div><div class="v">${esc(sys.accel || '-')}${sys.qemu && sys.qemu.kvmReason ? ' — ' + esc(sys.qemu.kvmReason) : ''}</div></div>
+            <div class="item"><div class="k">CPU</div><div class="v">${sys.cpus || '-'} cores</div></div>
+            <div class="item"><div class="k">RAM</div><div class="v">${fmtBytes(sys.mem ? sys.mem.total : 0)}</div></div>
+            <div class="item"><div class="k">Panel uptime</div><div class="v">${Math.round((sys.uptime || 0) / 60)} min</div></div>
+            <div class="item"><div class="k">Version</div><div class="v">${esc(sys.version || '')}</div></div>
+          </div>
+          <div class="hint-box mt16">
+            <b>Bahut zaroori:</b> agar aapka VPS internet par direct reachable nahi hai (NAT), to panel khud tunnel se kholna hoga —
+            jaise <span class="mono-code">ssh -p 443 -R0:localhost:8080 a.pinggy.io</span> ya Cloudflare Tunnel.
+            Usi URL se dost bhi console use kar sakte hain.
+          </div>
+          <div class="hint-box warn">
+            KVM nahi hai to har VM slow chalega. Zyada VMs chalane se pehle <span class="mono-code">free -m</span> dekhein — sabki RAM host ki RAM se zyada na ho.
+          </div>
+        </div>
+      </div>
+    `
+    );
+
+    document.getElementById('set-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      try {
+        await api('/api/settings', { method: 'POST', body: { sshHost: fd.get('sshHost'), panelName: fd.get('panelName') } });
+        toast('Save ho gaya', 'ok');
       } catch (err) {
-        if (!err.isAuth) toast(err.message, 'error');
+        toast(err.message, 'err');
       }
-      break;
-
-    case 'download-logs': {
-      const bot = botById(botId);
-      downloadLogs(botId, bot && bot.name);
-      break;
-    }
-
-    case 'add-env':
-      addEnvRow();
-      break;
-
-    case 'remove-env': {
-      const row = trigger.closest('[data-env-row]');
-      if (row) row.remove();
-      break;
-    }
-
-    case 'save-bot':
-      saveBotSettings(botId);
-      break;
-
-    case 'clone-bot':
-      cloneBotDialog(botId);
-      break;
-
-    case 'delete-bot':
-      deleteBotDialog(botId);
-      break;
-
-    case 'files-refresh':
-      loadFiles(botId, state.filePath);
-      break;
-
-    case 'files-open-dir':
-      loadFiles(botId, path);
-      break;
-
-    case 'files-new-file':
-      newFileDialog(botId);
-      break;
-
-    case 'files-new-folder':
-      newFolderDialog(botId);
-      break;
-
-    case 'files-upload': {
-      state.uploadBotId = botId;
-      state.uploadDir = state.filePath;
-      const input = $('#upload-input');
-      input.value = '';
-      input.click();
-      break;
-    }
-
-    case 'files-edit':
-      openEditor(botId, path);
-      break;
-
-    case 'files-download':
-      downloadFile(botId, path);
-      break;
-
-    case 'files-rename':
-      renameDialog(botId, path);
-      break;
-
-    case 'files-delete':
-      deleteFileDialog(botId, path);
-      break;
-
-    case 'files-extract':
-      extractDialog(botId, path);
-      break;
-
-    case 'save-panel-name':
-      savePanelName();
-      break;
-
-    case 'change-password':
-      changePassword();
-      break;
-
-    default:
-      break;
-  }
-});
-
-document.addEventListener('submit', async (event) => {
-  const form = event.target;
-
-  if (form.id === 'console-form') {
-    event.preventDefault();
-    const input = $('#console-input');
-    if (!input || !input.value.trim()) return;
-    const line = input.value;
-    input.value = '';
-    try {
-      await api(`/api/bots/${form.dataset.bot}/input`, { method: 'POST', body: { data: line + '\n' } });
-      appendLog({ t: Date.now(), s: 'sys', m: `› ${line}` });
-    } catch (err) {
-      if (!err.isAuth) toast(err.message, 'error');
-    }
-  }
-});
-
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') {
-    if ($('#modal-root').children.length) closeModal();
-    else closeSidebar();
-  }
-});
-
-/* Upload input */
-const uploadInput = $('#upload-input');
-if (uploadInput) {
-  uploadInput.addEventListener('change', async (event) => {
-    const files = Array.from(event.target.files || []);
-    if (!files.length || !state.uploadBotId) return;
-    const botId = state.uploadBotId;
-    const dir = state.uploadDir;
-    state.uploadBotId = null;
-    state.uploadDir = null;
-    await uploadFiles(botId, dir, files);
-  });
-}
-
-/* ------------------------------- boot ------------------------------- */
-
-window.addEventListener('hashchange', () => {
-  if (!state.me) return;
-  onRoute();
-});
-
-(async function boot() {
-  try {
-    state.status = await api('/api/auth/status');
-  } catch (err) {
-    if (state.token) {
-      // server may be up but auth status failing; still attempt
-    }
-    state.status = { setup: false, panelName: 'BotDeck' };
+    };
+    document.getElementById('pw-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      try {
+        await api('/api/panel/password', { method: 'POST', body: { current: fd.get('current'), next: fd.get('next') } });
+        toast('Password badal gaya', 'ok');
+        e.target.reset();
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    };
   }
 
-  if (state.token) {
-    try {
-      state.me = await api('/api/me');
-    } catch (err) {
-      if (err.isAuth) {
-        state.token = '';
-        localStorage.removeItem('bd_token');
+  // ---------------- public console ----------------
+  function viewPublicConsole(token) {
+    stopPolling();
+    app.innerHTML = `
+      <div class="topbar">
+        <div class="brand"><img src="/assets/favicon.svg" alt=""/>VPSDeck <span class="sub">console</span></div>
+        <div class="grow"></div>
+        <span class="badge" id="pub-state">connecting…</span>
+      </div>
+      <div class="wrap">
+        <div class="term">
+          <div class="term-head"><span class="dots"><i></i><i></i><i></i></span> shared serial console</div>
+          <div class="term-body" id="term-body" tabindex="0"></div>
+          <div class="term-foot"><span>Terminal par click karein phir keyboard se type karein</span></div>
+        </div>
+        <div class="hint-box mt16">Aap sirf serial console dekh/use kar rahe hain. VM ko restart ya delete karne ka access nahi hai.</div>
+      </div>`;
+    const body = document.getElementById('term-body');
+    const state = document.getElementById('pub-state');
+    let es;
+    let buf = '';
+    const send = debounce((text) => {
+      fetch(`/api/public/console/${encodeURIComponent(token)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: text })
+      }).catch(() => {});
+    }, 40);
+
+    const open = () => {
+      es = new EventSource(`/api/public/console/${encodeURIComponent(token)}`);
+      es.onopen = () => (state.textContent = 'connected');
+      es.onerror = () => {
+        state.textContent = 'disconnected';
+      };
+      es.onmessage = (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d.out) append(d.out);
+        } catch {}
+      };
+      es.addEventListener('hello', () => (state.textContent = 'live'));
+    };
+    const append = (txt) => {
+      buf += cleanAnsi(txt);
+      if (buf.length > 200000) buf = buf.slice(-120000);
+      body.textContent = buf;
+      body.scrollTop = body.scrollHeight;
+    };
+    body.addEventListener('keydown', (e) => {
+      const seq = keyToSeq(e);
+      if (seq == null) return;
+      e.preventDefault();
+      send(seq);
+    });
+    body.focus();
+    open();
+  }
+
+  // ---------------- terminal ----------------
+  function cleanAnsi(s) {
+    return String(s)
+      .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+      .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')
+      .replace(/\x1b[()][A-Z0-9]/g, '')
+      .replace(/\r(?!\n)/g, '')
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
+  }
+
+  function keyToSeq(e) {
+    const k = e.key;
+    if (e.ctrlKey && !e.altKey && k.length === 1) {
+      const code = k.toUpperCase().charCodeAt(0);
+      if (code >= 64 && code <= 95) return String.fromCharCode(code - 64);
+    }
+    if (e.metaKey) return null;
+    switch (k) {
+      case 'Enter':
+        return '\r';
+      case 'Backspace':
+        return '\x7f';
+      case 'Tab':
+        return '\t';
+      case 'Escape':
+        return '\x1b';
+      case 'ArrowUp':
+        return '\x1b[A';
+      case 'ArrowDown':
+        return '\x1b[B';
+      case 'ArrowRight':
+        return '\x1b[C';
+      case 'ArrowLeft':
+        return '\x1b[D';
+      case 'Home':
+        return '\x1b[H';
+      case 'End':
+        return '\x1b[F';
+      case 'Delete':
+        return '\x1b[3~';
+      case 'PageUp':
+        return '\x1b[5~';
+      case 'PageDown':
+        return '\x1b[6~';
+      default:
+        if (k && k.length === 1) return k;
+        return null;
+    }
+  }
+
+  class Term {
+    constructor(el, vmId, { shareToken = null, stateEl = null } = {}) {
+      this.el = el;
+      this.vmId = vmId;
+      this.shareToken = shareToken;
+      this.stateEl = stateEl;
+      this.buf = '';
+      this.es = null;
+      this.pending = '';
+      this.timer = null;
+      this.onKey = this.onKey.bind(this);
+    }
+
+    open() {
+      const url = this.shareToken
+        ? `/api/public/console/${encodeURIComponent(this.shareToken)}`
+        : `/api/vms/${this.vmId}/console`;
+      this.es = new EventSource(url);
+      this.es.onopen = () => this.state('live');
+      this.es.onerror = () => this.state('disconnected');
+      this.es.onmessage = (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d.out) this.append(d.out);
+        } catch {}
+      };
+      this.es.addEventListener('hello', (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          this.state(`${d.name || 'vm'} — live`);
+        } catch {}
+      });
+      this.el.addEventListener('keydown', this.onKey);
+      this.el.addEventListener('click', () => this.el.focus());
+      this.el.focus();
+    }
+
+    state(t) {
+      if (this.stateEl) this.stateEl.textContent = t;
+    }
+
+    append(txt) {
+      this.buf += cleanAnsi(txt);
+      if (this.buf.length > 300000) this.buf = this.buf.slice(-200000);
+      const atBottom = this.el.scrollTop + this.el.clientHeight >= this.el.scrollHeight - 40;
+      this.el.textContent = this.buf;
+      if (atBottom) this.el.scrollTop = this.el.scrollHeight;
+    }
+
+    onKey(e) {
+      const seq = keyToSeq(e);
+      if (seq == null) return;
+      e.preventDefault();
+      this.pending += seq;
+      if (!this.timer) {
+        this.timer = setTimeout(() => {
+          const data = this.pending;
+          this.pending = '';
+          this.timer = null;
+          const url = this.shareToken
+            ? `/api/public/console/${encodeURIComponent(this.shareToken)}`
+            : `/api/vms/${this.vmId}/console`;
+          fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data })
+          }).catch(() => {});
+        }, 35);
       }
     }
+
+    close() {
+      if (this.es) this.es.close();
+      this.es = null;
+      this.el.removeEventListener('keydown', this.onKey);
+    }
   }
 
-  if (state.me) {
-    await startApp();
-  } else {
-    showAuth(state.status);
+  function debounce(fn, ms) {
+    let t;
+    return (...a) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn(...a), ms);
+    };
   }
+
+  // ---------------- modals ----------------
+  function modal({ title, sub, body, okText = 'OK', wide = false, after, onOk }) {
+    const back = document.createElement('div');
+    back.className = 'modal-back';
+    back.innerHTML = `
+      <div class="modal ${wide ? 'modal-wide' : ''}" role="dialog" aria-modal="true">
+        <h2>${esc(title)}</h2>
+        ${sub ? `<p class="modal-sub">${sub}</p>` : ''}
+        <div class="modal-body">${body}</div>
+        <div class="modal-foot">
+          <button class="ghost" data-close>Cancel</button>
+          <button class="primary" data-ok>${esc(okText)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(back);
+    const close = () => {
+      back.remove();
+      document.removeEventListener('keydown', onEsc);
+    };
+    const onEsc = (e) => {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('keydown', onEsc);
+    back.addEventListener('click', (e) => {
+      if (e.target === back || e.target.closest('[data-close]')) close();
+    });
+    back.querySelector('[data-ok]').onclick = async () => {
+      if (onOk && (await onOk()) === false) return;
+      close();
+    };
+    if (after) after(back);
+    S._closeModal = close;
+    return close;
+  }
+
+  function closeModal() {
+    if (S._closeModal) S._closeModal();
+    const backs = document.querySelectorAll('.modal-back');
+    backs.forEach((b) => b.remove());
+  }
+
+  function confirmDialog({ title, sub, okText = 'Confirm', danger = false }) {
+    return new Promise((resolve) => {
+      const back = document.createElement('div');
+      back.className = 'modal-back';
+      back.innerHTML = `
+        <div class="modal" style="max-width:440px">
+          <h2>${esc(title)}</h2>
+          <p class="modal-sub">${esc(sub || '')}</p>
+          <div class="modal-foot">
+            <button class="ghost" data-no>Cancel</button>
+            <button class="${danger ? 'danger' : 'primary'}" data-yes>${esc(okText)}</button>
+          </div>
+        </div>`;
+      document.body.appendChild(back);
+      const done = (v) => {
+        back.remove();
+        resolve(v);
+      };
+      back.querySelector('[data-no]').onclick = () => done(false);
+      back.querySelector('[data-yes]').onclick = () => done(true);
+      back.addEventListener('click', (e) => {
+        if (e.target === back) done(false);
+      });
+      back.querySelector('[data-yes]').focus();
+    });
+  }
+
+  function promptDialog({ title, label, value = '' }) {
+    return new Promise((resolve) => {
+      const back = document.createElement('div');
+      back.className = 'modal-back';
+      back.innerHTML = `
+        <div class="modal" style="max-width:420px">
+          <h2>${esc(title)}</h2>
+          <label class="field"><span class="lbl">${esc(label)}</span><input type="text" id="pv" value="${esc(value)}" /></label>
+          <div class="modal-foot"><button class="ghost" data-no>Cancel</button><button class="primary" data-yes>OK</button></div>
+        </div>`;
+      document.body.appendChild(back);
+      const input = back.querySelector('#pv');
+      input.focus();
+      input.select();
+      const done = (v) => {
+        back.remove();
+        resolve(v);
+      };
+      back.querySelector('[data-no]').onclick = () => done(null);
+      back.querySelector('[data-yes]').onclick = () => done(input.value.trim() || null);
+      input.onkeydown = (e) => {
+        if (e.key === 'Enter') done(input.value.trim() || null);
+        if (e.key === 'Escape') done(null);
+      };
+    });
+  }
+
+  // ---------------- routing ----------------
+  function parseHash() {
+    const h = location.hash.replace(/^#\/?/, '');
+    const parts = h.split('/').filter(Boolean);
+    if (!parts.length) return { name: 'vms' };
+    if (parts[0] === 'vm' && parts[1]) return { name: 'vm', id: parts[1] };
+    if (parts[0] === 'images') return { name: 'images' };
+    if (parts[0] === 'settings') return { name: 'settings' };
+    if (parts[0] === 'console' && parts[1]) return { name: 'public-console', token: parts[1] };
+    return { name: 'vms' };
+  }
+
+  async function route() {
+    const r = parseHash();
+    S.route = r;
+    if (S.term) {
+      S.term.close();
+      S.term = null;
+    }
+    if (r.name === 'public-console') return viewPublicConsole(r.token);
+    if (!S.authed) return renderLogin(S.needsSetup);
+
+    try {
+      if (r.name === 'vm') return await viewVm(r.id);
+      if (r.name === 'images') return await viewImages();
+      if (r.name === 'settings') return await viewSettings();
+      return await viewVms();
+    } catch (e) {
+      if (!/Login/.test(e.message)) toast(e.message, 'err');
+    }
+  }
+
+  // ---------------- boot ----------------
+  async function boot(afterLogin = false) {
+    const st = await api('/api/auth/state').catch(() => ({ needsSetup: false, authed: false }));
+    S.needsSetup = st.needsSetup;
+    S.authed = st.authed;
+    if (!st.authed) return renderLogin(st.needsSetup);
+    if (!afterLogin) await loadSystem().catch(() => {});
+    await route();
+  }
+
+  window.addEventListener('hashchange', () => route());
+  boot();
 })();

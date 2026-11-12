@@ -1,133 +1,72 @@
 'use strict';
-
-const fs = require('fs');
-const fsp = fs.promises;
-const path = require('path');
-const { uid } = require('./util');
-
 /**
- * Tiny dependency-free JSON store with atomic writes.
- * Everything lives in one file: data/panel.json
+ * Panel state — data/panel.json
+ * Saare write ek queue se hote hain, isliye parallel requests se file corrupt nahi hoti.
  */
-class Store {
-  constructor(file) {
-    this.file = file;
-    this.data = null;
-    this._timer = null;
-    this._writing = null;
-  }
+const fs = require('fs');
+const { PANEL_JSON, DATA_DIR } = require('./config');
+const { readJson, writeJsonAtomic, ensureDir } = require('./util');
 
-  load() {
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    let raw = null;
-    try {
-      raw = fs.readFileSync(this.file, 'utf8');
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-    }
+const EMPTY = () => ({
+  version: 1,
+  createdAt: Date.now(),
+  auth: null,
+  vms: [],
+  images: [],
+  settings: {}
+});
 
-    if (raw) {
-      try {
-        this.data = JSON.parse(raw);
-      } catch (err) {
-        const backup = `${this.file}.corrupt-${Date.now()}`;
-        try {
-          fs.writeFileSync(backup, raw);
-        } catch (_) {
-          /* ignore */
-        }
-        console.error(`[store] panel.json is corrupt, backup saved to ${backup}. Starting fresh.`);
-        this.data = null;
-      }
-    }
+let state = null;
+let queue = Promise.resolve();
+let dirty = false;
 
-    if (!this.data || typeof this.data !== 'object') this.data = this._defaults();
-    this.data.settings = Object.assign(this._defaultSettings(), this.data.settings || {});
-    if (!Array.isArray(this.data.bots)) this.data.bots = [];
-    this.save(true);
-    return this;
-  }
+async function init() {
+  await ensureDir(DATA_DIR);
+  state = Object.assign(EMPTY(), await readJson(PANEL_JSON, {}));
+  if (!Array.isArray(state.vms)) state.vms = [];
+  if (!Array.isArray(state.images)) state.images = [];
+  if (!state.settings) state.settings = {};
+  return state;
+}
 
-  _defaults() {
-    return { version: 1, settings: this._defaultSettings(), bots: [] };
-  }
+function get() {
+  if (!state) throw new Error('store not initialised');
+  return state;
+}
 
-  _defaultSettings() {
-    return {
-      panelName: 'BotDeck',
-      passwordHash: null,
-      sessionsVersion: uid('sv'),
-      createdAt: Date.now(),
-      installedAt: null,
-      lastLoginAt: null
-    };
-  }
+/** Serialized save — ek ke baad ek. */
+function save() {
+  queue = queue.then(async () => {
+    if (!dirty) return;
+    dirty = false;
+    await writeJsonAtomic(PANEL_JSON, state);
+  });
+  return queue.catch((e) => {
+    console.error('[store] save failed:', e.message);
+  });
+}
 
-  get settings() {
-    return this.data.settings;
-  }
+/** Mutate + save shortcut. */
+async function update(fn) {
+  const r = fn(get());
+  dirty = true;
+  await save();
+  return r;
+}
 
-  save(immediate = false) {
-    if (this._timer) {
-      clearTimeout(this._timer);
-      this._timer = null;
-    }
-    if (immediate) return this._flush();
-    this._timer = setTimeout(() => {
-      this._timer = null;
-      this._flush().catch((err) => console.error('[store] save failed:', err.message));
-    }, 120);
-    this._timer.unref?.();
-    return Promise.resolve();
-  }
+/** File me bhi turant likhna ho to (shutdown ke waqt) */
+async function flush() {
+  dirty = true;
+  await save();
+}
 
-  async _flush() {
-    if (this._writing) await this._writing.catch(() => {});
-    const payload = JSON.stringify(this.data, null, 2);
-    const tmp = `${this.file}.tmp-${process.pid}`;
-    this._writing = (async () => {
-      await fsp.mkdir(path.dirname(this.file), { recursive: true });
-      await fsp.writeFile(tmp, payload, 'utf8');
-      await fsp.rename(tmp, this.file);
-    })();
-    try {
-      await this._writing;
-    } finally {
-      this._writing = null;
-    }
-  }
-
-  /* ---------------------------- bots ---------------------------------- */
-
-  get bots() {
-    return this.data.bots;
-  }
-
-  getBot(id) {
-    return this.data.bots.find((b) => b.id === id) || null;
-  }
-
-  addBot(bot) {
-    this.data.bots.push(bot);
-    this.save();
-    return bot;
-  }
-
-  updateBot(id, patch) {
-    const bot = this.getBot(id);
-    if (!bot) return null;
-    Object.assign(bot, patch, { updatedAt: Date.now() });
-    this.save();
-    return bot;
-  }
-
-  removeBot(id) {
-    const index = this.data.bots.findIndex((b) => b.id === id);
-    if (index === -1) return false;
-    this.data.bots.splice(index, 1);
-    this.save();
+function lastWriteOk() {
+  try {
+    fs.accessSync(PANEL_JSON, fs.constants.W_OK);
     return true;
+  } catch {
+    return false;
   }
 }
 
-module.exports = Store;
+module.exports = { init, get, save, update, flush, lastWriteOk };
