@@ -10,7 +10,7 @@ const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const cfg = require('./config');
 const store = require('./store');
-const { ensureDir, fileSize, fmtBytes, hostMemMb, exists } = require('./util');
+const { ensureDir, fileSize, fmtBytes, hostMemMb, exists, modelNeedMb } = require('./util');
 
 const HF = 'https://huggingface.co';
 
@@ -105,7 +105,7 @@ function pickInstalled() {
     })
     .filter((m) => m.exists);
   if (!all.length) return null;
-  const fits = all.filter((m) => Math.ceil((m.size * 1.15) / 1048576) + 512 <= ram);
+  const fits = all.filter((m) => modelNeedMb(m.size, ram) <= ram);
   const pool = fits.length ? fits : all;
   pool.sort((a, b) => b.size - a.size);
   return pool[0];

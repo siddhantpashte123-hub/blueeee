@@ -134,6 +134,16 @@ function hostMemMb() {
   return lim && lim < host ? lim : host;
 }
 
+/**
+ * Model chalane ke liye kitni RAM chahiye (MB).
+ * reserve = OS + panel ke liye; chhote VPS par 512 MB fixed rakhna galat tha.
+ */
+function modelNeedMb(sizeBytes, ramMb = hostMemMb()) {
+  const sizeMb = Math.ceil((Number(sizeBytes) * 1.15) / 1048576);
+  const reserve = Math.min(512, Math.max(128, Math.round(ramMb * 0.15)));
+  return sizeMb + reserve;
+}
+
 function memInfo() {
   try {
     const txt = fs.readFileSync('/proc/meminfo', 'utf8');
@@ -271,6 +281,7 @@ module.exports = {
   portFree,
   fmtBytes,
   hostMemMb,
+  modelNeedMb,
   cgroupMemMb,
   memInfo,
   procInfo,

@@ -12,7 +12,7 @@ const { spawn } = require('child_process');
 const cfg = require('./config');
 const store = require('./store');
 const models = require('./models');
-const { which, sleep, procInfo, pidAlive, hostMemMb } = require('./util');
+const { which, sleep, procInfo, pidAlive, hostMemMb, modelNeedMb } = require('./util');
 
 const state = {
   mode: 'local', // local | external
@@ -138,15 +138,16 @@ async function load(modelId, { force = false } = {}) {
   // RAM pre-flight: model VPS me fit hoga ya nahi
   try {
     const st = await fsp.stat(file);
-    const needMb = Math.ceil((st.size * 1.15) / 1048576) + 512;
     const haveMb = hostMemMb();
+    const needMb = modelNeedMb(st.size, haveMb);
     if (needMb > haveMb) {
+      const rec = models.recommendFor();
       throw Object.assign(
         new Error(
-          `Ye model ~${(needMb / 1024).toFixed(1)} GB RAM maangta hai, is VPS me ${(haveMb / 1024).toFixed(1)} GB hai. ` +
-            'Chhota model download karein (Qwen2.5-Coder 1.5B) — warna panel OOM se band ho sakta hai.'
+          `Ye model ~${(needMb / 1024).toFixed(1)} GB RAM maangta hai, is VPS me sirf ${(haveMb / 1024).toFixed(1)} GB hai. ` +
+            (rec ? `Chhota model download karein (${rec.name}, ${rec.sizeGB} GB) — warna panel OOM se band ho sakta hai.` : '')
         ),
-        { status: 507 }
+        { status: 507, code: 'ram_too_small', modelId: rec ? rec.id : null, modelName: rec ? rec.name : null }
       );
     }
     log(`ram check: need ~${needMb} MB, available ${haveMb} MB`);
@@ -177,7 +178,7 @@ async function load(modelId, { force = false } = {}) {
       '-m', file,
       '--host', cfg.LLM_HOST,
       '--port', String(cfg.LLM_PORT),
-      '-c', String(store.get().settings.ctxSize || cfg.CTX_SIZE),
+      '-c', String(ctxSize()),
       '-t', String(cfg.THREADS),
       '--parallel', '1',
       '--metrics'
@@ -258,6 +259,14 @@ async function stop() {
   state.modelName = null;
   state.startedAt = null;
   return status();
+}
+
+/** Context window — RAM bahut kam ho to chhota rakho (OOM se bachne ke liye) */
+function ctxSize() {
+  const want = Number(store.get().settings.ctxSize || cfg.CTX_SIZE) || cfg.CTX_SIZE;
+  const ram = hostMemMb();
+  const cap = ram < 1536 ? 2048 : ram < 3072 ? 3072 : 8192;
+  return Math.max(1024, Math.min(want, cap));
 }
 
 /**

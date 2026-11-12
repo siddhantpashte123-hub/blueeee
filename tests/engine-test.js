@@ -133,6 +133,13 @@ async function main() {
 
   await request('POST', '/api/auth/setup', { password: 'forge123456' });
 
+  console.log('\n[0] RAM formula (chhote VPS)');
+  const { modelNeedMb } = require(path.join(ROOT, 'src/util.js'));
+  check('1 GB VPS par 0.5B allowed', modelNeedMb(0.4 * 1024 ** 3, 953) <= 953);
+  check('1 GB VPS par 1.5B blocked', modelNeedMb(1.0 * 1024 ** 3, 953) > 953);
+  check('4 GB VPS par 3B allowed', modelNeedMb(1.9 * 1024 ** 3, 3900) <= 3900);
+  check('8 GB VPS par 7B allowed', modelNeedMb(4.7 * 1024 ** 3, 8192) <= 8192);
+
   console.log('\n[1] Model auto-scan');
   let r = await request('POST', '/api/models/refresh');
   // panel boot par hi scan kar leta hai, isliye added 0 ya 1 dono theek
