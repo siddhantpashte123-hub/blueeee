@@ -95,7 +95,7 @@ function status() {
     rss: info ? info.rss : 0,
     uptime: state.startedAt ? Date.now() - state.startedAt : 0,
     modelId: state.modelId,
-    modelName: state.modelName,
+    modelName: state.modelName || (state.mode === 'external' && state.status === 'ready' ? 'external engine' : null),
     url: baseUrl(),
     tokensPerSec: state.lastTokensPerSec,
     bin: state.bin,
