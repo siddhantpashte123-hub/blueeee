@@ -433,6 +433,12 @@ Use **Force kill** (SIGKILL). On the settings tab it's under *Danger zone*.
 **Live console not updating behind Nginx**  
 Set `proxy_buffering off;` and raise `proxy_read_timeout` for the location.
 
+**The installer still says "Creating systemd service" (old version)**  
+`raw.githubusercontent.com` caches for a few minutes. Use the commit-pinned URL
+from the releases section / add a cache buster: `...install.sh?cb=$(date +%s)`.
+The installer prints its version in the banner (`installer v2.1`), so you can
+tell immediately whether you got the current script.
+
 **`systemctl: command not found` during install**  
 That host has no systemd. The current installer detects this and switches to
 standalone mode automatically (`botdeck` control script + cron autostart) —

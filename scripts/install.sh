@@ -19,6 +19,8 @@
 #
 set -euo pipefail
 
+INSTALLER_VERSION="2.1"
+
 APP_DIR="${APP_DIR:-/opt/botdeck}"
 PORT="${PORT:-3000}"
 SERVICE_NAME="botdeck"
@@ -55,7 +57,7 @@ die()  { printf '  \033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "Please run as root:  sudo bash scripts/install.sh"
 
 bold ""
-bold "  BotDeck installer — Docker-free bot hosting panel"
+bold "  BotDeck installer v${INSTALLER_VERSION} — Docker-free bot hosting panel"
 bold "  =================================================="
 echo
 
