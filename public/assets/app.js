@@ -244,7 +244,13 @@
     app.innerHTML = `
       <div class="auth-wrap">
         <div class="auth-card">
-          <div class="brand"><img src="/assets/favicon.svg" alt=""/>Forge</div>
+          <div class="auth-head">
+            <div class="mark"><img src="/assets/favicon.svg" alt=""/></div>
+            <div>
+              <h1>Forge</h1>
+              <span class="kicker">local ai code studio</span>
+            </div>
+          </div>
           <p class="lead">${
             setup
               ? 'Pehli baar? Panel ka password set karein — ye AI aapke VPS par hi chalta hai, koi cloud nahi.'
@@ -258,9 +264,7 @@
             ${setup ? '<label class="field"><span class="lbl">Dobara likhein</span><input type="password" id="pw2" autocomplete="new-password"/></label>' : ''}
             <button class="primary" style="width:100%;justify-content:center" type="submit">${setup ? 'Set password' : 'Login'}</button>
           </form>
-          <p style="text-align:center;color:var(--txt-mute);font-size:11.5px;margin:16px 0 0">
-            100% local · llama.cpp engine · koi API key nahi
-          </p>
+          <p class="note">100% local · llama.cpp engine · koi API key nahi</p>
         </div>
       </div>`;
 
@@ -361,12 +365,15 @@
     $('#btn-attach').onclick = openAttachMenu;
     $('#btn-zip').onclick = () => (location.href = '/api/files/zip');
     $('#btn-close-aside').onclick = () => {
-      $('#main').classList.remove('aside-open');
-      $('#aside').style.display = 'none';
+      const m = $('#main');
+      m.classList.remove('aside-open');
+      m.classList.add('aside-hidden');
     };
     $('#btn-aside').onclick = () => {
+      const m = $('#main');
       $('#aside').style.display = '';
-      $('#main').classList.toggle('aside-open');
+      m.classList.remove('aside-hidden');
+      m.classList.toggle('aside-open');
     };
     $('#btn-sidebar').onclick = () => $('#main').classList.toggle('sidebar-open');
     $('#btn-delchat').onclick = deleteChat;
@@ -410,6 +417,21 @@
   }
 
   function onChatClick(e) {
+    const copyMsg = e.target.closest('[data-copy-msg]');
+    if (copyMsg) {
+      const m = (S.chat.messages || [])[Number(copyMsg.dataset.copyMsg)];
+      if (m) navigator.clipboard.writeText(m.content || '').then(() => toast('Reply copy ho gaya', 'ok'));
+      return;
+    }
+    const promptMsg = e.target.closest('[data-prompt-msg]');
+    if (promptMsg) {
+      const m = (S.chat.messages || [])[Number(promptMsg.dataset.promptMsg)];
+      if (m) {
+        $('#prompt').value = m.content || '';
+        $('#prompt').focus();
+      }
+      return;
+    }
     const copyBtn = e.target.closest('[data-copy]');
     if (copyBtn) {
       const item = codeStore[Number(copyBtn.dataset.copy)];
@@ -540,17 +562,19 @@
     if (!msgs.length && !S.streamBuf) {
       inner.innerHTML = `
         <div class="empty-chat">
+          <div class="eyebrow"><i class="dot" style="width:5px;height:5px;background:var(--green)"></i>100% local · koi API key nahi</div>
           <div class="big">Bolo, kya banayein?</div>
-          <div class="sub">Local model aapke VPS par chal raha hai — code likhega, files workspace me jayengi.</div>
+          <div class="sub">Model aapke hi VPS par chalta hai — jo code likhega wahi seedha workspace me file ban jayega.</div>
           <div class="suggestions">
             ${[
-              ['Premium landing page', 'Glassmorphism hero, pricing, mobile responsive — ek page me.', 'Ek premium SaaS landing page banao glassmorphism hero ke saath, dark theme, pricing section aur mobile responsive. Poora HTML+CSS ek hi file me.'],
-              ['REST API + tests', 'Node.js Express API, validation, tests.', 'Ek Node.js REST API banao (Express) users CRUD ke liye — validation, error handling, aur ek test file. Har file poora likho.'],
-              ['Bug dhoondho', 'Code paste karo, root cause + fix.', 'Mera code kaam nahi kar raha — root cause batao aur fix karo:\n\n```js\n// apna code yahan paste karo\n```'],
-              ['Python script', 'CSV clean karke report banane wali script.', 'Ek Python script banao jo CSV file clean kare (duplicate, missing values) aur summary report print kare — argparse ke saath.']
+              ['🎨', 'Premium landing page', 'Glassmorphism hero, pricing, mobile responsive — ek page me.', 'Ek premium SaaS landing page banao glassmorphism hero ke saath, dark theme, pricing section aur mobile responsive. Poora HTML+CSS ek hi file me.'],
+              ['⚡', 'REST API + tests', 'Node.js Express API, validation, tests.', 'Ek Node.js REST API banao (Express) users CRUD ke liye — validation, error handling, aur ek test file. Har file poora likho.'],
+              ['🐞', 'Bug dhoondho', 'Code paste karo, root cause + fix.', 'Mera code kaam nahi kar raha — root cause batao aur fix karo:\n\n```js\n// apna code yahan paste karo\n```'],
+              ['🐍', 'Python script', 'CSV clean karke report banane wali script.', 'Ek Python script banao jo CSV file clean kare (duplicate, missing values) aur summary report print kare — argparse ke saath.']
             ]
               .map(
-                ([t, d, p]) => `<div class="sugg" data-sugg="${esc(p)}"><b>${esc(t)}</b><span>${esc(d)}</span></div>`
+                ([ico, t, d, p]) =>
+                  `<div class="sugg" data-sugg="${esc(p)}"><span class="ico">${ico}</span><b>${esc(t)}</b><span>${esc(d)}</span></div>`
               )
               .join('')}
           </div>
@@ -560,11 +584,15 @@
     inner.innerHTML =
       msgs
         .map(
-          (m) => `<div class="msg ${m.role === 'user' ? 'user' : 'ai'}">
+          (m, i) => `<div class="msg ${m.role === 'user' ? 'user' : 'ai'}">
             <div class="avatar">${m.role === 'user' ? 'You' : 'AI'}</div>
             <div class="bubble">
               <div class="who">${m.role === 'user' ? 'Aap' : 'Forge'}${m.model ? ` · ${esc(m.model)}` : ''}</div>
               <div class="md">${renderMarkdown(m.content)}</div>
+              <div class="msg-actions">
+                <button data-copy-msg="${i}" title="Poora reply copy karein">Copy</button>
+                ${m.role === 'assistant' ? `<button data-prompt-msg="${i}" title="Is reply ko prompt me daalein">Edit</button>` : ''}
+              </div>
             </div>
           </div>`
         )
@@ -1079,7 +1107,7 @@
     if (stats) {
       const cls = eng.status === 'ready' ? 'ok live' : eng.status === 'starting' ? 'warn live' : eng.status === 'error' ? 'err' : '';
       stats.innerHTML = `
-        <span class="chip ${cls}" title="${esc(eng.error || '')}">
+        <span class="chip model ${cls}" title="${esc(eng.error || '')}">
           <i class="dot"></i>${eng.status === 'ready' ? esc(eng.modelName || 'model') : eng.status}
         </span>
         <span class="chip hide-sm tok-rate">${eng.tokensPerSec ? eng.tokensPerSec + ' tok/s' : '— tok/s'}</span>
@@ -1112,11 +1140,14 @@
     $$('.backdrop').forEach((b) => b.remove());
   }
 
-  function modal(html, { wide = false } = {}) {
+  function modal(title, sub, html, { wide = false } = {}) {
     closeModal();
     const back = document.createElement('div');
     back.className = 'backdrop';
-    back.innerHTML = `<div class="modal ${wide ? 'wide' : ''}">${html}</div>`;
+    back.innerHTML = `<div class="modal ${wide ? 'wide' : ''}">
+      <div class="modal-head"><h2>${esc(title)}</h2>${sub ? `<p class="sub">${esc(sub)}</p>` : ''}</div>
+      <div class="modal-body">${html}</div>
+    </div>`;
     back.addEventListener('click', (e) => {
       if (e.target === back) closeModal();
     });
@@ -1125,7 +1156,12 @@
   }
 
   async function openModels() {
-    const back = modal(`<h2>Models</h2><p class="sub">Local GGUF models. Jitni RAM hai utna model chunein.</p><div id="models-body">Loading…</div>`, { wide: true });
+    const back = modal(
+      'Models',
+      'Local GGUF models — jitni RAM hai utna hi model chunein.',
+      '<div id="models-body">Loading…</div>',
+      { wide: true }
+    );
     const render = async () => {
       let d;
       try {
@@ -1294,9 +1330,7 @@
   function openSettings() {
     const sys = S.system || { settings: {} };
     const st = sys.settings || {};
-    const back = modal(`
-      <h2>Settings</h2>
-      <p class="sub">Model behaviour aur panel password.</p>
+    const back = modal('Settings', 'Model behaviour aur panel password.', `
       <label class="field"><span class="lbl">Temperature — ${st.temperature} <span class="hint" style="display:inline">(kam = focused code, zyada = creative)</span></span>
         <input type="range" id="s-temp" min="0" max="1.2" step="0.05" value="${st.temperature}"/>
       </label>
